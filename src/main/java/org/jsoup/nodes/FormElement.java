@@ -91,8 +91,9 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the data that this form submits. The returned list is a copy of the data, and changes to the contents of the
-     * list will not be reflected in the DOM.
+     * Get the data that this form submits, following the browser's "successful controls" semantics, in DOM order. The
+     * returned list is a copy of the data, and changes to the contents of the list will not be reflected in the DOM.
+     * The form's controls are re-queried from the DOM on each call, so changes made after parsing are reflected.
      * @return a list of key vals
      */
     public List<Connection.KeyVal> formData() {
@@ -103,21 +104,26 @@ public class FormElement extends Element {
         for (Element el: formEls) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+            if (el.closest("fieldset[disabled]") != null) continue; // skip controls within a disabled fieldset
             String name = el.attr("name");
             if (name.length() == 0) continue;
             String type = el.attr("type");
 
-            if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
+            // browsers don't submit these (a clicked submit/image button contributes itself, which we don't model)
+            if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image") ||
+                type.equalsIgnoreCase("reset") || type.equalsIgnoreCase("submit")) continue;
 
             if (el.nameIs("select")) {
                 Elements options = el.select("option[selected]");
                 boolean set = false;
                 for (Element option: options) {
+                    if (option.hasAttr("disabled")) continue; // disabled options are not successful
                     data.add(HttpConnection.KeyVal.create(name, option.val()));
                     set = true;
                 }
-                if (!set) {
-                    Element option = el.selectFirst("option");
+                if (!set && !el.hasAttr("multiple")) {
+                    // a single-select with no selected option submits its first enabled option
+                    Element option = el.selectFirst("option:not([disabled])");
                     if (option != null)
                         data.add(HttpConnection.KeyVal.create(name, option.val()));
                 }

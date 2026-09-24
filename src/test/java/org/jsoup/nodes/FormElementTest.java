@@ -160,10 +160,10 @@ public class FormElementTest {
         Document doc = Jsoup.parse(html);
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(3, data.size());
+        assertEquals(2, data.size());
         assertEquals("user", data.get(0).key());
         assertEquals("pass", data.get(1).key());
-        assertEquals("login", data.get(2).key());
+        // the submit button "login" is not included, as browsers only submit the clicked button
     }
 
     @Test public void removeFormElement() {
@@ -182,9 +182,8 @@ public class FormElementTest {
         pass.remove();
 
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(2, data.size());
+        assertEquals(1, data.size());
         assertEquals("user", data.get(0).key());
-        assertEquals("login", data.get(1).key());
         assertNull(doc.selectFirst("input[name=pass]"));
     }
 
@@ -222,5 +221,94 @@ public class FormElementTest {
         List<Connection.KeyVal> keyVals = form.formData();
         assertEquals("one", keyVals.get(0).value());
         assertEquals("two", keyVals.get(1).value());
+    }
+
+    @Test public void multipleSelectSubmitsAllSelectedOptions() {
+        String html = "<form><select name=multi multiple>" +
+            "<option value=one selected><option value=two><option value=three selected>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("multi=one", data.get(0).toString());
+        assertEquals("multi=three", data.get(1).toString());
+    }
+
+    @Test public void multipleSelectWithNoSelectionSubmitsNothing() {
+        String html = "<form><select name=multi multiple><option value=one><option value=two></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test public void singleSelectFallsBackToFirstEnabledOption() {
+        String html = "<form><select name=single><option value=one disabled><option value=two></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("single=two", data.get(0).toString());
+    }
+
+    @Test public void disabledFieldsetDisablesDescendantControls() {
+        String html = "<form>" +
+            "<fieldset disabled><input name=inner value=foo><select name=sel><option value=opt></select></fieldset>" +
+            "<fieldset><input name=outer value=bar></fieldset>" +
+            "<input name=free value=baz>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("outer=bar", data.get(0).toString());
+        assertEquals("free=baz", data.get(1).toString());
+    }
+
+    @Test public void buttonTypesAreNotSubmitted() {
+        String html = "<form>" +
+            "<input type=submit name=sub value=s><input type=reset name=res value=r>" +
+            "<input type=button name=btn value=b><input type=image name=img value=i>" +
+            "<button name=btn2 value=b2></button>" +
+            "<input type=text name=ok value=v>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("ok=v", data.get(0).toString());
+    }
+
+    @Test public void usesOnForRadioValueIfNoValueSet() {
+        Document doc = Jsoup.parse("<form><input type=radio checked name=foo></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals("on", data.get(0).value());
+        assertEquals("foo", data.get(0).key());
+    }
+
+    @Test public void submitThrowsIfExplicitActionDoesNotResolve() {
+        String html = "<form action='/search'><input name='q'></form>";
+        Document doc = Jsoup.parse(html); // no base URI, so the relative action cannot be made absolute
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, form::submit);
+        assertEquals("Could not determine a form action URL for submit. Ensure you set a base URI when parsing.",
+            e.getMessage());
+    }
+
+    @Test public void formDataDoesNotValidateActionUrl() {
+        String html = "<form action='/search'><input name='q' value=jsoup></form>";
+        Document doc = Jsoup.parse(html); // no base URI; formData() must not care
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("q=jsoup", data.get(0).toString());
     }
 }
