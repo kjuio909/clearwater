@@ -91,7 +91,13 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the data that this form submits. The returned list is a copy of the data, and changes to the contents of the
+     * Get the data that this form submits, using the browser's <i>successful controls</i> semantics: controls are
+     * returned in DOM order; controls without a {@code name}, disabled controls (including those inside a disabled
+     * {@code fieldset}), and {@code button} / {@code reset} / {@code submit} / {@code image} inputs are excluded;
+     * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
+     * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
+     * falls back to its first non-disabled option. The list is re-queried from the DOM on each call, so changes to
+     * the document are reflected. The returned list is a copy of the data, and changes to the contents of the
      * list will not be reflected in the DOM.
      * @return a list of key vals
      */
@@ -102,24 +108,30 @@ public class FormElement extends Element {
         Elements formEls = elements();
         for (Element el: formEls) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
-            if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+            if (isDisabled(el)) continue; // skip disabled form inputs
             String name = el.attr("name");
             if (name.length() == 0) continue;
             String type = el.attr("type");
 
-            if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
+            if (el.nameIs("button") || type.equalsIgnoreCase("button") || type.equalsIgnoreCase("reset")
+                || type.equalsIgnoreCase("submit") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these (a submit button only if it was the clicker)
 
             if (el.nameIs("select")) {
                 Elements options = el.select("option[selected]");
                 boolean set = false;
                 for (Element option: options) {
+                    if (option.hasAttr("disabled")) continue; // disabled options are not successful
                     data.add(HttpConnection.KeyVal.create(name, option.val()));
                     set = true;
                 }
-                if (!set) {
-                    Element option = el.selectFirst("option");
-                    if (option != null)
-                        data.add(HttpConnection.KeyVal.create(name, option.val()));
+                if (!set && !el.hasAttr("multiple")) {
+                    // a single select defaults to its first non-disabled option
+                    for (Element option : el.select("option")) {
+                        if (!option.hasAttr("disabled")) {
+                            data.add(HttpConnection.KeyVal.create(name, option.val()));
+                            break;
+                        }
+                    }
                 }
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
@@ -132,6 +144,18 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     * A form control is disabled if it has the {@code disabled} attribute, or if it is a descendant of a
+     * {@code fieldset} that does.
+     */
+    private static boolean isDisabled(Element el) {
+        for (Element parent = el; parent != null; parent = parent.parent()) {
+            if (parent.hasAttr("disabled") && (parent == el || parent.nameIs("fieldset")))
+                return true;
+        }
+        return false;
     }
 
     @Override

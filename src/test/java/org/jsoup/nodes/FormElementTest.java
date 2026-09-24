@@ -160,10 +160,10 @@ public class FormElementTest {
         Document doc = Jsoup.parse(html);
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(3, data.size());
+        assertEquals(2, data.size());
         assertEquals("user", data.get(0).key());
         assertEquals("pass", data.get(1).key());
-        assertEquals("login", data.get(2).key());
+        // login is a submit button, and so is not included in the form data
     }
 
     @Test public void removeFormElement() {
@@ -182,9 +182,9 @@ public class FormElementTest {
         pass.remove();
 
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(2, data.size());
+        assertEquals(1, data.size());
         assertEquals("user", data.get(0).key());
-        assertEquals("login", data.get(1).key());
+        // login is a submit button, and so is not included in the form data
         assertNull(doc.selectFirst("input[name=pass]"));
     }
 
@@ -222,5 +222,113 @@ public class FormElementTest {
         List<Connection.KeyVal> keyVals = form.formData();
         assertEquals("one", keyVals.get(0).value());
         assertEquals("two", keyVals.get(1).value());
+    }
+
+    @Test void multipleSelectSubmitsAllSelectedOptions() {
+        String html = "<form><select name=multi multiple>" +
+            "<option value=a selected><option value=b><option value=c selected><option value=d selected disabled>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("multi=a", data.get(0).toString());
+        assertEquals("multi=c", data.get(1).toString());
+        // b is not selected; d is disabled
+    }
+
+    @Test void multipleSelectWithNoSelectionSubmitsNothing() {
+        String html = "<form><select name=multi multiple><option value=a><option value=b></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertEquals(0, form.formData().size());
+    }
+
+    @Test void singleSelectDefaultsToFirstEnabledOption() {
+        String html = "<form><select name=one><option value=a disabled><option value=b><option value=c selected></select>" +
+            "<select name=two><option value=d disabled><option value=e></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("one=c", data.get(0).toString()); // explicit selection wins
+        assertEquals("two=e", data.get(1).toString()); // no selection: first non-disabled option
+    }
+
+    @Test void disabledFieldsetDisablesDescendantControls() {
+        String html = "<form>" +
+            "<fieldset disabled><input name=a value=1><select name=b><option value=2></select><textarea name=c>3</textarea></fieldset>" +
+            "<input name=d value=4>" +
+            "<fieldset><input name=e value=5></fieldset>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("d=4", data.get(0).toString());
+        assertEquals("e=5", data.get(1).toString());
+    }
+
+    @Test void buttonSubmitResetTypesAreNotSubmitted() {
+        String html = "<form>" +
+            "<input type=submit name=s value=1><input type=reset name=r value=2>" +
+            "<input type=button name=b value=3><button name=c value=4>Go</button>" +
+            "<input type=text name=t value=5>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("t=5", data.get(0).toString());
+    }
+
+    @Test void checkboxDefaultsToOnAndRespectsChecked() {
+        String html = "<form>" +
+            "<input type=checkbox name=a checked>" + // no value -> on
+            "<input type=checkbox name=b value=yes checked>" +
+            "<input type=checkbox name=c>" + // not checked -> skipped
+            "<input type=radio name=d value=1 checked><input type=radio name=d value=2>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("a=on", data.get(0).toString());
+        assertEquals("b=yes", data.get(1).toString());
+        assertEquals("d=1", data.get(2).toString());
+    }
+
+    @Test void submitThrowsOnUnresolvableAction() {
+        String html = "<form action='not-resolvable-without-base'><input name='q'></form>";
+        Document doc = Jsoup.parse(html); // no base URI, so the relative action cannot be made absolute
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        boolean threw = false;
+        try {
+            form.submit();
+        } catch (IllegalArgumentException e) {
+            threw = true;
+            assertEquals("Could not determine a form action URL for submit. Ensure you set a base URI when parsing.",
+                e.getMessage());
+        }
+        assertTrue(threw);
+
+        // formData() does not validate the action URL
+        assertEquals(1, form.formData().size());
+    }
+
+    @Test void submitUsesBaseUriWhenNoAction() {
+        String html = "<form><input name='q' value='jsoup'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/page");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Connection con = form.submit();
+
+        assertEquals("http://example.com/page", con.request().url().toExternalForm());
+        assertEquals(Connection.Method.GET, con.request().method());
     }
 }
