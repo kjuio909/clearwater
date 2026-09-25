@@ -93,7 +93,8 @@ public class FormElement extends Element {
     /**
      * Get the data that this form submits, using the browser's <i>successful controls</i> semantics: controls are
      * returned in DOM order; controls without a {@code name}, disabled controls (including those inside a disabled
-     * {@code fieldset}), and {@code button} / {@code reset} / {@code submit} / {@code image} inputs are excluded;
+     * {@code fieldset}, excepting descendants of that fieldset's first {@code legend} child), and {@code button} /
+     * {@code reset} / {@code submit} / {@code image} inputs are excluded;
      * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
      * falls back to its first non-disabled option. The list is re-queried from the DOM on each call, so changes to
@@ -148,12 +149,34 @@ public class FormElement extends Element {
 
     /**
      * A form control is disabled if it has the {@code disabled} attribute, or if it is a descendant of a
-     * {@code fieldset} that does.
+     * {@code fieldset} that does. Controls descending from the fieldset's first {@code legend} element child are
+     * excepted from that fieldset's disabling (but may still be disabled by their own attribute or another
+     * ancestor fieldset). Evaluated from the live DOM on each call.
      */
     private static boolean isDisabled(Element el) {
-        for (Element parent = el; parent != null; parent = parent.parent()) {
-            if (parent.hasAttr("disabled") && (parent == el || parent.nameIs("fieldset")))
+        if (el.hasAttr("disabled")) return true;
+        for (Element parent = el.parent(); parent != null; parent = parent.parent()) {
+            if (parent.nameIs("fieldset") && parent.hasAttr("disabled") && !inFirstLegend(parent, el))
                 return true;
+        }
+        return false;
+    }
+
+    /**
+     * Tests if {@code el} descends from the first {@code legend} element child of {@code fieldset} (which must be an
+     * ancestor of {@code el}). Only that first direct-child legend is excepted; later or nested legends are not.
+     */
+    private static boolean inFirstLegend(Element fieldset, Element el) {
+        Element legend = null;
+        for (Element child : fieldset.children()) {
+            if (child.nameIs("legend")) {
+                legend = child;
+                break;
+            }
+        }
+        if (legend == null) return false;
+        for (Element parent = el.parent(); parent != null && parent != fieldset; parent = parent.parent()) {
+            if (parent == legend) return true;
         }
         return false;
     }

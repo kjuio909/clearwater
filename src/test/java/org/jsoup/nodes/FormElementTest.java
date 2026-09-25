@@ -272,6 +272,106 @@ public class FormElementTest {
         assertEquals("e=5", data.get(1).toString());
     }
 
+    @Test void disabledFieldsetFirstLegendControlsRemainSubmittable() {
+        String html = "<form>" +
+            "<fieldset disabled>" +
+            "<legend><input name=a value=1><select name=b><option value=2></select></legend>" +
+            "<input name=c value=3>" +
+            "<div><input name=d value=4></div>" +
+            "</fieldset>" +
+            "<input name=e value=5>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("a=1", data.get(0).toString());
+        assertEquals("b=2", data.get(1).toString());
+        assertEquals("e=5", data.get(2).toString());
+    }
+
+    @Test void onlyFirstDirectChildLegendIsExcepted() {
+        String html = "<form><fieldset disabled>" +
+            "<div><legend><input name=a value=1></legend></div>" + // nested legend: not a direct child
+            "<legend><input name=b value=2></legend>" + // first direct-child legend
+            "<legend><input name=c value=3></legend>" + // subsequent legend: not excepted
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("b=2", data.get(0).toString());
+    }
+
+    @Test void legendExceptionDoesNotLiftOtherDisabledFieldsets() {
+        String html = "<form>" +
+            "<fieldset disabled><legend>" +
+            "<fieldset disabled><input name=a value=1></fieldset>" + // inner fieldset still disables
+            "<input name=b value=2>" + // only inside outer's first legend: submittable
+            "</legend></fieldset>" +
+            "<fieldset disabled><legend></legend>" +
+            "<fieldset disabled><legend><input name=c value=3></legend></fieldset>" + // inner legend exception does not lift outer
+            "</fieldset>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("b=2", data.get(0).toString());
+    }
+
+    @Test void fieldsetDisabledStateTracksLiveDom() {
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=a value=1></legend>" +
+            "<legend><input name=b value=2></legend>" +
+            "<input name=c value=3>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element fieldset = doc.selectFirst("fieldset");
+        Element firstLegend = doc.selectFirst("legend");
+        Element inputA = doc.selectFirst("input[name=a]");
+        Element inputC = doc.selectFirst("input[name=c]");
+
+        // removing the first legend promotes the next direct-child legend
+        firstLegend.remove();
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("b=2", data.get(0).toString());
+
+        // moving a control into the (now first) legend restores it; moving one out excludes it
+        firstLegend.appendChild(inputC); // reinsert old legend after the current one: no longer first
+        fieldset.appendChild(firstLegend);
+        data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("b=2", data.get(0).toString());
+
+        // enabling the fieldset restores all controls in DOM order
+        fieldset.removeAttr("disabled");
+        data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("b=2", data.get(0).toString());
+        assertEquals("a=1", data.get(1).toString());
+        assertEquals("c=3", data.get(2).toString());
+
+        // moving a control into a now-disabled fieldset excludes it again
+        fieldset.attr("disabled", "");
+        doc.selectFirst("form").appendChild(fieldset); // keep structure; move b's input out of legend
+        Element inputB = doc.selectFirst("input[name=b]");
+        fieldset.appendChild(inputB);
+        data = form.formData();
+        assertEquals(0, data.size());
+
+        // moving a control out of the disabled fieldset restores it
+        doc.selectFirst("form").appendChild(inputA);
+        data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("a=1", data.get(0).toString());
+    }
+
     @Test void buttonSubmitResetTypesAreNotSubmitted() {
         String html = "<form>" +
             "<input type=submit name=s value=1><input type=reset name=r value=2>" +
