@@ -331,4 +331,255 @@ public class FormElementTest {
         assertEquals("http://example.com/page", con.request().url().toExternalForm());
         assertEquals(Connection.Method.GET, con.request().method());
     }
+
+    private static java.util.List<String> dataStrings(FormElement form) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (Connection.KeyVal kv : form.formData()) out.add(kv.toString());
+        return out;
+    }
+
+    @Test void firstLegendOfDisabledFieldsetIsExempt() {
+        // controls inside the first direct legend child are still submittable; everything else is disabled
+        String html = "<form>" +
+            "<fieldset disabled>" +
+            "<legend><input name=inlegend value=1><div><input name=nestedinlegend value=2></div></legend>" +
+            "<input name=afterlegend value=3>" +
+            "<div><input name=indiv value=4></div>" +
+            "</fieldset>" +
+            "<input name=outside value=5>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Arrays.asList("inlegend=1", "nestedinlegend=2", "outside=5"), dataStrings(form));
+    }
+
+    @Test void firstLegendNeedNotBeFirstNode() {
+        // text and other elements may precede it; the first direct legend element child is what counts
+        String html = "<form><fieldset disabled>intro text<p>hi</p>" +
+            "<legend><input name=a value=1></legend><input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+    }
+
+    @Test void onlyFirstDirectLegendIsExempt() {
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=first value=1></legend>" +
+            "<legend><input name=second value=2></legend>" +
+            "<div><legend><input name=nestedlegend value=3></legend></div>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Collections.singletonList("first=1"), dataStrings(form));
+    }
+
+    @Test void legendNotDirectChildDoesNotExempt() {
+        String html = "<form><fieldset disabled>" +
+            "<div><legend><input name=a value=1></legend></div>" +
+            "<input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(0, form.formData().size());
+    }
+
+    @Test void nestedDisabledFieldsetsEachHaveOwnLegendBoundary() {
+        // outer disabled, inner disabled: outer's first legend does not exempt controls in the inner
+        // fieldset's restricted area, but the inner fieldset's own first legend still exempts
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=outerlegend value=1>" +
+                "<fieldset disabled><input name=inner value=2>" +
+                    "<legend><input name=innerlegend value=3></legend>" +
+                "</fieldset>" +
+            "</legend>" +
+            "<input name=outerrest value=4>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Arrays.asList("outerlegend=1", "innerlegend=3"), dataStrings(form));
+    }
+
+    @Test void innerLegendExemptionDoesNotLiftOuterDisabledFieldset() {
+        // the inner fieldset's first legend lifts the inner disablement, but the control is still in the
+        // outer disabled fieldset's restricted area (outside its first legend), so it stays disabled
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=a value=1></legend>" +
+            "<fieldset disabled>" +
+                "<legend><input name=b value=2></legend>" +
+                "<input name=c value=3>" +
+            "</fieldset>" +
+            "<input name=d value=4>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+    }
+
+    @Test void enabledFieldsetSubmitsByNormalRules() {
+        String html = "<form><fieldset>" +
+            "<legend><input name=a value=1></legend>" +
+            "<input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Arrays.asList("a=1", "b=2"), dataStrings(form));
+    }
+
+    @Test void controlOwnDisabledWinsInsideExemptLegend() {
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=a value=1 disabled><input name=b value=2></legend>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals(java.util.Collections.singletonList("b=2"), dataStrings(form));
+    }
+
+    @Test void disablingAndEnablingFieldsetIsReflectedLive() {
+        String html = "<form><fieldset>" +
+            "<legend><input name=a value=1></legend>" +
+            "<input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element fieldset = doc.selectFirst("fieldset");
+
+        assertEquals(java.util.Arrays.asList("a=1", "b=2"), dataStrings(form));
+
+        fieldset.attr("disabled", "");
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+
+        fieldset.removeAttr("disabled");
+        assertEquals(java.util.Arrays.asList("a=1", "b=2"), dataStrings(form));
+    }
+
+    @Test void deletingFirstLegendPromotesNextDirectLegend() {
+        String html = "<form><fieldset disabled>" +
+            "<legend><input name=a value=1></legend>" +
+            "<legend><input name=b value=2></legend>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+
+        doc.selectFirst("legend").remove();
+        assertEquals(java.util.Collections.singletonList("b=2"), dataStrings(form));
+    }
+
+    @Test void movingControlsAcrossLegendBoundaryIsReflectedLive() {
+        String html = "<form><fieldset disabled>" +
+            "<legend id=leg><input name=a value=1></legend>" +
+            "<input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element legend = doc.selectFirst("#leg");
+        Element a = doc.selectFirst("input[name=a]");
+        Element b = doc.selectFirst("input[name=b]");
+
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+
+        // exempt area -> outside the legend: dropped
+        legend.after(a);
+        assertEquals(0, form.formData().size());
+
+        // outside -> inside the legend: restored
+        legend.appendChild(b);
+        assertEquals(java.util.Collections.singletonList("b=2"), dataStrings(form));
+    }
+
+    @Test void movingControlBetweenDisabledAndEnabledFieldsetIsReflectedLive() {
+        String html = "<form>" +
+            "<fieldset disabled><legend id=leg><input name=a value=1></legend></fieldset>" +
+            "<fieldset id=open><input name=b value=2></fieldset>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element a = doc.selectFirst("input[name=a]");
+        Element open = doc.selectFirst("#open");
+
+        assertEquals(java.util.Arrays.asList("a=1", "b=2"), dataStrings(form));
+
+        open.appendChild(a); // exempt legend of disabled fieldset -> enabled fieldset: still submittable
+        assertEquals(java.util.Arrays.asList("b=2", "a=1"), dataStrings(form));
+
+        doc.selectFirst("#leg").appendChild(a); // back into disabled fieldset's first legend: submittable
+        assertEquals(java.util.Arrays.asList("a=1", "b=2"), dataStrings(form));
+    }
+
+    @Test void newlyAddedControlInLegendIsImmediatelySubmittable() {
+        String html = "<form><fieldset disabled><legend id=leg></legend></fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertEquals(0, form.formData().size());
+
+        doc.selectFirst("#leg").appendElement("input").attr("name", "a").attr("value", "1");
+        assertEquals(java.util.Collections.singletonList("a=1"), dataStrings(form));
+    }
+
+    @Test void legendExemptionKeepsDomOrderAndDoesNotDedupe() {
+        String html = "<form>" +
+            "<input name=x value=0>" +
+            "<fieldset disabled>" +
+                "<legend><input name=x value=1></legend>" +
+                "<input name=x value=2>" + // excluded
+            "</fieldset>" +
+            "<input name=x value=3>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        // tree order retained, same-name controls not merged; the disabled control is simply absent
+        assertEquals(java.util.Arrays.asList("x=0", "x=1", "x=3"), dataStrings(form));
+    }
+
+    @Test void formDataIsIndependentSnapshotPerCall() {
+        String html = "<form><fieldset disabled>" +
+            "<legend id=leg><input name=a value=1></legend>" +
+            "<input name=b value=2>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> first = form.formData();
+        List<Connection.KeyVal> second = form.formData();
+        assertNotSame(first, second);
+        assertEquals(1, first.size());
+        assertEquals(1, second.size());
+
+        // mutate the DOM after the read; the returned list is not rewritten
+        doc.selectFirst("#leg").appendElement("input").attr("name", "c").attr("value", "3");
+        assertEquals(1, first.size());
+        assertEquals(1, second.size());
+        assertEquals(2, form.formData().size());
+
+        // interleaved reads never accumulate previous results
+        List<Connection.KeyVal> again = form.formData();
+        assertEquals(2, again.size());
+        assertEquals(2, form.formData().size());
+    }
+
+    @Test void disabledControlsNeitherThrowNorAffectOthers() {
+        String html = "<form><fieldset disabled>" +
+            "<input name=a value=1>" +
+            "<select name=b><option value=2></select>" +
+            "<textarea name=c>3</textarea>" +
+            "<legend><input name=d value=4></legend>" +
+            "</fieldset><input name=e value=5></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = assertDoesNotThrow(form::formData);
+        assertEquals(2, data.size());
+        assertEquals("d=4", data.get(0).toString());
+        assertEquals("e=5", data.get(1).toString());
+    }
 }

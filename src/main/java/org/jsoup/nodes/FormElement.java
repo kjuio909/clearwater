@@ -93,12 +93,13 @@ public class FormElement extends Element {
     /**
      * Get the data that this form submits, using the browser's <i>successful controls</i> semantics: controls are
      * returned in DOM order; controls without a {@code name}, disabled controls (including those inside a disabled
-     * {@code fieldset}), and {@code button} / {@code reset} / {@code submit} / {@code image} inputs are excluded;
-     * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
-     * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
-     * falls back to its first non-disabled option. The list is re-queried from the DOM on each call, so changes to
-     * the document are reflected. The returned list is a copy of the data, and changes to the contents of the
-     * list will not be reflected in the DOM.
+     * {@code fieldset}, except for controls within the fieldset's first direct {@code legend} child), and
+     * {@code button} / {@code reset} / {@code submit} / {@code image} inputs are excluded; checkboxes and radios are
+     * only included when {@code checked} (defaulting to the value {@code "on"}); a {@code select[multiple]} submits
+     * every selected option, while a single {@code select} with no selected option falls back to its first
+     * non-disabled option. The list is re-queried from the DOM on each call, so changes to the document are
+     * reflected. The returned list is a copy of the data, and changes to the contents of the list will not be
+     * reflected in the DOM.
      * @return a list of key vals
      */
     public List<Connection.KeyVal> formData() {
@@ -148,12 +149,39 @@ public class FormElement extends Element {
 
     /**
      * A form control is disabled if it has the {@code disabled} attribute, or if it is a descendant of a
-     * {@code fieldset} that does.
+     * {@code fieldset} that does &mdash; except for controls inside the fieldset's first {@code legend} child, per
+     * the browser's disabled fieldset semantics. Only the first direct {@code legend} of the disabled fieldset is
+     * exempt, and the exemption only lifts that fieldset's disablement: a control may still be disabled by another
+     * disabled fieldset in its ancestry. The check walks the live DOM, so structural changes are reflected on the
+     * next call.
      */
     private static boolean isDisabled(Element el) {
-        for (Element parent = el; parent != null; parent = parent.parent()) {
-            if (parent.hasAttr("disabled") && (parent == el || parent.nameIs("fieldset")))
+        if (el.hasAttr("disabled")) return true;
+        Element parent = el.parent();
+        while (parent != null) {
+            if (parent.nameIs("fieldset") && parent.hasAttr("disabled") && !inFirstLegend(parent, el))
                 return true;
+            parent = parent.parent();
+        }
+        return false;
+    }
+
+    /**
+     * Checks whether {@code el} is a descendant of the first direct {@code legend} child of the disabled
+     * {@code fieldset}. A legend nested inside another element (including a later legend) does not qualify.
+     */
+    private static boolean inFirstLegend(Element fieldset, Element el) {
+        Element legend = null;
+        for (Element child : fieldset.childElementsList()) {
+            if (child.nameIs("legend")) {
+                legend = child;
+                break; // only the first direct legend child exempts its descendants
+            }
+        }
+        if (legend == null) return false;
+        for (Element ancestor = el.parent(); ancestor != null; ancestor = ancestor.parent()) {
+            if (ancestor == legend) return true;
+            if (ancestor == fieldset) return false; // left the fieldset without passing through the legend
         }
         return false;
     }
