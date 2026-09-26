@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## 1.23.3 (Pending)
+
+### Bug Fixes
+* Fixed handling of null characters and initial newlines in HTML to better match the HTML spec, including `pre`, `listing`, and `textarea` elements. Leading newlines in these elements' text are preserved when saving and reparsing HTML. [#2616](https://github.com/jhy/jsoup/pull/2616)
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements
