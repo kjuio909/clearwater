@@ -2,6 +2,9 @@
 
 ## 1.23.3 (Pending)
 
+### Improvements
+* Added support for the CSS Selectors 4 `of` clause in `:nth-child(An+B of S)` and `:nth-last-child(An+B of S)`. When an `of` selector list is given, only sibling elements matching it are counted when determining an element's position, and the element itself must also match. E.g., `li:nth-child(2 of .enabled)` selects the second `li` with class `enabled`.
+
 ### Bug Fixes
 * Fixed handling of null characters and initial newlines in HTML to better match the HTML spec, including `pre`, `listing`, and `textarea` elements. Leading newlines in these elements' text are preserved when saving and reparsing HTML. [#2616](https://github.com/jhy/jsoup/pull/2616)
 

@@ -384,9 +384,22 @@ public class QueryParser implements AutoCloseable {
     //pseudo selectors :first-child, :last-child, :nth-child, ...
     private static final Pattern NthStepOffset = Pattern.compile("(([+-])?(\\d+)?)n(\\s*([+-])?\\s*\\d+)?", Pattern.CASE_INSENSITIVE);
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
+    private static final Pattern NthOfClause = Pattern.compile("\\s+of\\s+", Pattern.CASE_INSENSITIVE);
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+        String arg = consumeParens().trim();
+        String ofQuery = null;
+        if (!ofType) {
+            // split off an optional "of <selector-list>" clause; the An+B expression itself can never contain " of ",
+            // and the balanced parens consumer has already kept any commas, quotes, or nested parens within S intact
+            Matcher ofM = NthOfClause.matcher(arg);
+            if (ofM.find()) {
+                ofQuery = arg.substring(ofM.end()).trim();
+                arg = arg.substring(0, ofM.start());
+                Validate.notEmpty(ofQuery, ":nth-child(of) must have a selector list");
+            }
+        }
+        arg = normalize(arg); // arg is like "odd", or "-n+2", within nth-child(odd)
         final int step, offset;
         if ("odd".equals(arg)) {
             step = 2;
@@ -402,7 +415,8 @@ public class QueryParser implements AutoCloseable {
                 else // no digits, might be like n+2, or -n+2. if group(2) == "-", it’s -1;
                     step = "-".equals(stepOffsetM.group(2)) ? -1 : 1;
                 offset =
-                    stepOffsetM.group(4) != null ? Integer.parseInt(stepOffsetM.group(4).replaceFirst("^\\+", "")) : 0;
+                    stepOffsetM.group(4) != null ?
+                        Integer.parseInt(stepOffsetM.group(4).replaceAll("\\s", "").replaceFirst("^\\+", "")) : 0;
             } else if ((stepM = NthOffset.matcher(arg)).matches()) {
                 step = 0;
                 offset = Integer.parseInt(stepM.group().replaceFirst("^\\+", ""));
@@ -411,6 +425,10 @@ public class QueryParser implements AutoCloseable {
             }
         }
 
+        if (ofQuery != null) {
+            Evaluator of = parse(ofQuery);
+            return last ? new Evaluator.IsNthLastChildOf(step, offset, of) : new Evaluator.IsNthChildOf(step, offset, of);
+        }
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));

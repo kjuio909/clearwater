@@ -1413,6 +1413,163 @@ public class SelectorTest {
         assertSelectedOwnText(neg2, "1", "2");
     }
 
+    @Test void nthChildOfSelector() {
+        String html = "<ul>" +
+            "<li id=1 class=a></li><li id=2></li><li id=3 class=a></li>" +
+            "<li id=4 class=a></li><li id=5></li><li id=6 class=a></li>" +
+            "</ul>";
+        Document doc = Jsoup.parse(html);
+        // the .a set is ids 1, 3, 4, 6
+
+        assertSelectedIds(doc.select("li:nth-child(1 of .a)"), "1");
+        assertSelectedIds(doc.select("li:nth-child(2 of .a)"), "3");
+        assertSelectedIds(doc.select("li:nth-child(4 of .a)"), "6");
+        assertSelectedIds(doc.select("li:nth-child(odd of .a)"), "1", "4");
+        assertSelectedIds(doc.select("li:nth-child(even of .a)"), "3", "6");
+        assertSelectedIds(doc.select("li:nth-child(2n of .a)"), "3", "6");
+        assertSelectedIds(doc.select("li:nth-child(2n+1 of .a)"), "1", "4");
+        assertSelectedIds(doc.select("li:nth-child(-n+2 of .a)"), "1", "3");
+        assertSelectedIds(doc.select("li:nth-child(n+3 of .a)"), "4", "6");
+        assertSelectedIds(doc.select("li:nth-child( 2n + 1 of .a )"), "1", "4");
+        assertSelectedIds(doc.select("li:nth-child(2 OF .a)"), "3"); // case-insensitive of
+
+        // nth-last-child counts from the end of the filtered set
+        assertSelectedIds(doc.select("li:nth-last-child(1 of .a)"), "6");
+        assertSelectedIds(doc.select("li:nth-last-child(2 of .a)"), "4");
+        assertSelectedIds(doc.select("li:nth-last-child(odd of .a)"), "3", "6");
+        assertSelectedIds(doc.select("li:nth-last-child(even of .a)"), "1", "4");
+        assertSelectedIds(doc.select("li:nth-last-child(-n+2 of .a)"), "4", "6");
+
+        // no matching members in the filtered set, or position out of range
+        assertTrue(doc.select("li:nth-child(1 of .missing)").isEmpty());
+        assertTrue(doc.select("li:nth-child(9 of .a)").isEmpty());
+        assertTrue(doc.select("li:nth-last-child(9 of .a)").isEmpty());
+
+        // the element itself must match the of selector to be positioned within it
+        assertSelectedIds(doc.select("li:nth-child(2 of li)"), "2");
+        assertTrue(doc.select("li:nth-child(2 of #2)").isEmpty()); // #2 is at unfiltered pos 2, but filtered pos 1
+        assertSelectedIds(doc.select("li:nth-child(1 of #2)"), "2");
+    }
+
+    @Test void nthChildOfIgnoresNonElementNodes() {
+        String html = "<div>" +
+            "<p id=1 class=a></p>text<!-- comment --><p id=2></p><p id=3 class=a></p>" +
+            "</div>";
+        Document doc = Jsoup.parse(html);
+
+        // text and comment nodes do not occupy positions, filtered or not
+        assertSelectedIds(doc.select("p:nth-child(2 of .a)"), "3");
+        assertSelectedIds(doc.select("p:nth-last-child(1 of .a)"), "3");
+        assertSelectedIds(doc.select("p:nth-child(2 of p)"), "2");
+    }
+
+    @Test void nthChildOfComplexSelectorList() {
+        String html = "<div>" +
+            "<span id=1 data-x='a,b'></span><span id=2 class='x y'></span>" +
+            "<span id=3 data-x='c'></span><span id=4 class=y></span><em id=5></em>" +
+            "</div>";
+        Document doc = Jsoup.parse(html);
+
+        // attribute values containing commas must not split the of list early
+        assertSelectedIds(doc.select("span:nth-child(1 of [data-x='a,b'])"), "1");
+        assertSelectedIds(doc.select("span:nth-child(2 of [data-x])"), "3");
+
+        // comma-separated selector list at the of level
+        assertSelectedIds(doc.select("span:nth-child(1 of [data-x], .x)"), "1");
+        assertSelectedIds(doc.select("span:nth-child(2 of [data-x], .x)"), "2");
+        assertSelectedIds(doc.select("span:nth-child(3 of [data-x], .x)"), "3");
+        assertSelectedIds(doc.select("span:nth-last-child(1 of [data-x], .x)"), "3");
+
+        // nested :not with its own selector list, and combinators within an of item
+        assertSelectedIds(doc.select("span:nth-child(1 of :not(.x, [data-x]))"), "4");
+        assertSelectedIds(doc.select("span:nth-child(1 of div > .y)"), "2");
+        assertSelectedIds(doc.select("span:nth-child(2 of div span)"), "2");
+
+        // quoted attribute value containing ' of ' does not end the of clause
+        String html2 = "<div><p id=1 title='a of b'></p><p id=2 title='c'></p></div>";
+        Document doc2 = Jsoup.parse(html2);
+        assertSelectedIds(doc2.select("p:nth-child(1 of [title='a of b'])"), "1");
+        assertSelectedIds(doc2.select("p:nth-child(2 of [title])"), "2");
+    }
+
+    @Test void nthChildOfCombinesWithOtherSelectors() {
+        String html = "<ul id=o><li id=1 class=a></li><li id=2 class=a></li><li id=3></li><li id=4 class=a></li></ul>" +
+            "<ul id=p><li id=5 class=a></li><li id=6 class=a></li></ul>";
+        Document doc = Jsoup.parse(html);
+
+        // intersects with the rest of the selector; positions are per-parent
+        assertSelectedIds(doc.select("ul > li.a:nth-child(2 of .a)"), "2", "6");
+        assertSelectedIds(doc.select("#o li:nth-child(3 of .a)"), "4");
+        assertSelectedIds(doc.select("li:nth-child(2 of .a) + li"), "3");
+        assertSelectedIds(doc.select("li:not(:nth-child(1 of .a)):nth-child(1 of .a + li)"), "2", "6");
+
+        // results are in document order, with no duplicates from multiple of list items
+        assertSelectedIds(doc.select("li:nth-child(odd of .a, .a)"), "1", "4", "5");
+
+        // works from an element select() root, and does not count elements outside that root
+        Element p = doc.expectFirst("#p");
+        assertSelectedIds(p.select("li:nth-child(2 of .a)"), "6");
+        assertSelectedIds(p.select("li:nth-last-child(2 of .a)"), "5");
+    }
+
+    @Test void nthChildOfReevaluatesOnDomChange() {
+        String html = "<ul><li id=1 class=a></li><li id=2 class=a></li><li id=3 class=a></li></ul>";
+        Document doc = Jsoup.parse(html);
+
+        assertSelectedIds(doc.select("li:nth-child(2 of .a)"), "2");
+        assertSelectedIds(doc.select("li:nth-last-child(2 of .a)"), "2");
+
+        // changing an attribute used by the of selector shifts positions immediately
+        doc.expectFirst("#1").removeClass("a");
+        assertSelectedIds(doc.select("li:nth-child(2 of .a)"), "3");
+        assertSelectedIds(doc.select("li:nth-last-child(2 of .a)"), "2");
+
+        // removing a sibling reindexes both directions
+        doc.expectFirst("#2").remove();
+        assertSelectedIds(doc.select("li:nth-child(1 of .a)"), "3");
+        assertTrue(doc.select("li:nth-last-child(2 of .a)").isEmpty());
+
+        // adding a sibling reindexes
+        doc.expectFirst("ul").prependElement("li").addClass("a").id("0");
+        assertSelectedIds(doc.select("li:nth-child(2 of .a)"), "3");
+        assertSelectedIds(doc.select("li:nth-last-child(1 of .a)"), "3");
+
+        // a reused compiled evaluator also reflects the current DOM, with no stale positions
+        Evaluator eval = Selector.evaluatorOf("li:nth-child(2 of .a)");
+        assertSelectedIds(Selector.select(eval, doc), "3");
+        doc.expectFirst("#0").remove(); // .a set is now only #3, so no 2nd member
+        assertTrue(Selector.select(eval, doc).isEmpty());
+        doc.expectFirst("#3").before("<li id=4 class=a></li>");
+        assertSelectedIds(Selector.select(eval, doc), "3");
+    }
+
+    @Test void nthChildOfParseErrors() {
+        Document doc = Jsoup.parse("<ul><li id=1 class=a></li><li id=2 class=a></li></ul>");
+
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-child(2 of)"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-child(2 of )"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-child(of .a)"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-child(2n+ of .a)"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-child(2 of .a")); // unbalanced
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("li:nth-of-type(2 of .a)")); // of not supported for of-type
+
+        // a failed parse does not disturb subsequent queries
+        assertSelectedIds(doc.select("li:nth-child(2 of .a)"), "2");
+        assertSelectedIds(doc.select("li:nth-child(2)"), "2");
+    }
+
+    @Test void nthChildOfToString() {
+        assertEquals("li:nth-child(2n+1 of .a, .b)",
+            QueryParser.parse("li:nth-child(2n+1 of .a, .b)").toString());
+        assertEquals("li:nth-last-child(2 of [data-x])",
+            QueryParser.parse("li:nth-last-child(2 of [data-x])").toString());
+        assertEquals("li:nth-child(3 of li)",
+            QueryParser.parse("li:nth-child(3 of li)").toString());
+
+        // unchanged when no of clause
+        assertEquals("li:nth-child(2n+1)", QueryParser.parse("li:nth-child(2n+1)").toString());
+    }
+
     // Tests that nested structural and combining evaluators get reset
     private static class ResetTracker extends Evaluator {
         boolean resetCalled = false;

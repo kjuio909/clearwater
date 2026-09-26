@@ -647,6 +647,87 @@ public abstract class Evaluator {
     }
 
     /**
+     * Base evaluator for {@code :nth-child(An+B of S)} and {@code :nth-last-child(An+B of S)}. Positions are computed
+     * against only those sibling elements that match the {@code of} selector list; other siblings (and non-element
+     * nodes) do not occupy a position.
+     */
+    public static abstract class CssNthOfEvaluator extends CssNthEvaluator {
+        protected final Evaluator of;
+        private final boolean last;
+
+        public CssNthOfEvaluator(int step, int offset, boolean last, Evaluator of) {
+            super(step, offset);
+            this.last = last;
+            this.of = of;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            // an element not in the of S set has no position within it
+            return of.matches(root, element) && super.matches(root, element);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            // count matching siblings before (or after, for nth-last-child); self is known to match (see matches())
+            int pos = 1;
+            if (!last) {
+                for (Element sib = element.previousElementSibling(); sib != null; sib = sib.previousElementSibling()) {
+                    if (of.matches(root, sib)) pos++;
+                }
+            } else {
+                for (Element sib = element.nextElementSibling(); sib != null; sib = sib.nextElementSibling()) {
+                    if (of.matches(root, sib)) pos++;
+                }
+            }
+            return pos;
+        }
+
+        @Override protected void reset() {
+            of.reset();
+            super.reset();
+        }
+
+        @Override protected int cost() {
+            return 4 + of.cost();
+        }
+
+        @Override
+        public String toString() {
+            String nth = super.toString(); // e.g. ":nth-child(2n+1)"
+            return nth.substring(0, nth.length() - 1) + " of " + of + ")";
+        }
+    }
+
+    /**
+     * css pseudo class :nth-child(An+B of S)
+     */
+    public static final class IsNthChildOf extends CssNthOfEvaluator {
+        public IsNthChildOf(int step, int offset, Evaluator of) {
+            super(step, offset, false, of);
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
+    }
+
+    /**
+     * css pseudo class :nth-last-child(An+B of S)
+     */
+    public static final class IsNthLastChildOf extends CssNthOfEvaluator {
+        public IsNthLastChildOf(int step, int offset, Evaluator of) {
+            super(step, offset, true, of);
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-last-child";
+        }
+    }
+
+    /**
      * css pseudo class nth-of-type
      *
      */
