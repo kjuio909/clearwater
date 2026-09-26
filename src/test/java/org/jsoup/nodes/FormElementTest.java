@@ -257,6 +257,91 @@ public class FormElementTest {
         assertEquals("two=e", data.get(1).toString()); // no selection: first non-disabled option
     }
 
+    @Test void disabledOptgroupDisablesSelectedOptions() {
+        String html = "<form><select name=multi multiple>" +
+            "<optgroup disabled><option value=a selected><option value=b selected></optgroup>" +
+            "<option value=c selected>" +
+            "<optgroup><option value=d selected><option value=e></optgroup>" +
+            "<optgroup disabled><option value=f></optgroup>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("multi=c", data.get(0).toString());
+        assertEquals("multi=d", data.get(1).toString());
+        // a and b are disabled via their optgroup; e and f are not selected
+    }
+
+    @Test void singleSelectFallbackSkipsOptgroupDisabledOptions() {
+        String html = "<form>" +
+            "<select name=one><optgroup disabled><option value=a selected></optgroup><option value=b></select>" +
+            "<select name=two><optgroup disabled><option value=c selected><option value=d></optgroup></select>" +
+            "<select name=three><optgroup disabled><option value=e selected></optgroup></select>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("one=b", data.get(0).toString()); // selected a is optgroup-disabled: fall back to first enabled
+        // two: every option is optgroup-disabled, so no fallback candidate
+        // three: selected option is optgroup-disabled and no other candidate exists
+    }
+
+    @Test void optgroupDisabledStateTracksLiveDom() {
+        String html = "<form><select name=sel multiple>" +
+            "<optgroup id=g1><option value=a selected></optgroup>" +
+            "<optgroup id=g2 disabled><option value=b selected></optgroup>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element g1 = doc.selectFirst("#g1");
+        Element g2 = doc.selectFirst("#g2");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("sel=a", data.get(0).toString());
+
+        // toggling optgroup disabled is reflected on the next read
+        g2.removeAttr("disabled");
+        g1.attr("disabled", "");
+        data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("sel=b", data.get(0).toString());
+
+        // moving an option out of a disabled optgroup restores it
+        Element optionA = doc.selectFirst("option[value=a]");
+        g2.appendChild(optionA);
+        data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("sel=b", data.get(0).toString());
+        assertEquals("sel=a", data.get(1).toString());
+
+        // the returned list is a snapshot: later DOM changes do not rewrite it
+        g2.attr("disabled", "");
+        assertEquals(2, data.size());
+        assertEquals(0, form.formData().size());
+    }
+
+    @Test void legendExceptedSelectStillFiltersDisabledOptgroups() {
+        String html = "<form><fieldset disabled>" +
+            "<legend><select name=a multiple>" +
+            "<optgroup disabled><option value=1 selected></optgroup>" +
+            "<option value=2 selected>" +
+            "</select></legend>" +
+            "<select name=b><option value=3></select>" +
+            "</fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("a=2", data.get(0).toString());
+        // select b is inside the disabled fieldset (outside the first legend) and stays unsubmitted
+    }
+
     @Test void disabledFieldsetDisablesDescendantControls() {
         String html = "<form>" +
             "<fieldset disabled><input name=a value=1><select name=b><option value=2></select><textarea name=c>3</textarea></fieldset>" +
