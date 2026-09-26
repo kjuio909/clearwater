@@ -2,6 +2,9 @@
 
 ## 1.23.3 (Pending)
 
+### Improvements
+* Added support for the selector `<an+b> of <selector>` syntax in `:nth-child()` and `:nth-last-child()`, e.g. `li:nth-child(2 of .item)` matches an element that is the second `.item` among its element siblings. Positions are 1-based and are counted (or reverse-counted for `:nth-last-child`) only among same-parent element siblings matching the of-selector list, which may include attributes, combinators, and nested pseudos such as `:not()`; non-element nodes do not take positions. Queries without an `of` clause are unchanged.
+
 ### Bug Fixes
 * Fixed handling of null characters and initial newlines in HTML to better match the HTML spec, including `pre`, `listing`, and `textarea` elements. Leading newlines in these elements' text are preserved when saving and reparsing HTML. [#2616](https://github.com/jhy/jsoup/pull/2616)
 

@@ -583,6 +583,7 @@ public abstract class Evaluator {
             if (p == null || (p instanceof Document)) return false;
 
             final int pos = calculatePosition(root, element);
+            if (pos < 1) return false; // not part of the sibling set being counted (e.g. fails the of S filter)
             if (a == 0) return pos == b;
 
             return (pos - b) * a >= 0 && (pos - b) % a == 0;
@@ -644,6 +645,109 @@ public abstract class Evaluator {
 		protected String getPseudoClass() {
 			return "nth-last-child";
 		}
+    }
+
+    /**
+     * Base for the {@code An+B of S} form of {@code :nth-child()} and {@code :nth-last-child()}: position is counted
+     * only among the element siblings (under the same parent) that match the of-selector S. Non-element nodes do not
+     * take a position.
+     */
+    public static abstract class CssNthOfSelectorEvaluator extends CssNthEvaluator {
+        final Evaluator selector;
+
+        CssNthOfSelectorEvaluator(int step, int offset, Evaluator selector) {
+            super(step, offset);
+            this.selector = selector;
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            if (!selector.matches(root, element)) return 0; // not part of the filtered sibling set
+            return calculatePositionInSet(root, element);
+        }
+
+        abstract int calculatePositionInSet(Element root, Element element);
+
+        @Override protected int cost() {
+            return 10 * (2 + selector.cost());
+        }
+
+        @Override
+        protected void reset() {
+            selector.reset();
+            super.reset();
+        }
+    }
+
+    /**
+     * {@code :nth-child(An+B of S)} — position (1-based, document order) among siblings matching S.
+     */
+    public static final class IsNthChildOfSelector extends CssNthOfSelectorEvaluator {
+        public IsNthChildOfSelector(int step, int offset, Evaluator selector) {
+            super(step, offset, selector);
+        }
+
+        @Override
+        int calculatePositionInSet(Element root, Element element) {
+            int pos = 0;
+            for (Element sib = element.parent().firstElementChild(); sib != null; sib = sib.nextElementSibling()) {
+                if (selector.matches(root, sib)) pos++;
+                if (sib == element) break;
+            }
+            return pos;
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-child(%s of %s)", nthArgs(), selector);
+        }
+
+        String nthArgs() {
+            return
+                (a == 0) ? String.valueOf(b)
+                : (b == 0) ? a + "n"
+                : a + "n" + (b > 0 ? "+" + b : String.valueOf(b));
+        }
+    }
+
+    /**
+     * {@code :nth-last-child(An+B of S)} — reverse position (1-based) among siblings matching S.
+     */
+    public static final class IsNthLastChildOfSelector extends CssNthOfSelectorEvaluator {
+        public IsNthLastChildOfSelector(int step, int offset, Evaluator selector) {
+            super(step, offset, selector);
+        }
+
+        @Override
+        int calculatePositionInSet(Element root, Element element) {
+            int pos = 0;
+            for (Element sib = element; sib != null; sib = sib.nextElementSibling()) {
+                if (selector.matches(root, sib)) pos++;
+            }
+            return pos;
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-last-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-last-child(%s of %s)", nthArgs(), selector);
+        }
+
+        String nthArgs() {
+            return
+                (a == 0) ? String.valueOf(b)
+                : (b == 0) ? a + "n"
+                : a + "n" + (b > 0 ? "+" + b : String.valueOf(b));
+        }
     }
 
     /**

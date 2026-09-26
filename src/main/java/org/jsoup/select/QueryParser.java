@@ -235,8 +235,7 @@ public class QueryParser implements AutoCloseable {
             case "nth-of-type":
                 return cssNthChild(false, true);
             case "nth-last-of-type":
-                return cssNthChild(true, true);
-            case "first-child":
+                return cssNthChild(true, true);            case "first-child":
                 return new Evaluator.IsFirstChild();
             case "last-child":
                 return new Evaluator.IsLastChild();
@@ -386,34 +385,95 @@ public class QueryParser implements AutoCloseable {
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+        String arg = consumeParens(); // arg is like "odd", "-n+2", or "2n+1 of .foo .bar"
+        int ofIdx = indexOfOfClause(arg);
+        final String formula = normalize(ofIdx < 0 ? arg : arg.substring(0, ofIdx)).replaceAll("\\s+", "");
         final int step, offset;
-        if ("odd".equals(arg)) {
+        if ("odd".equals(formula)) {
             step = 2;
             offset = 1;
-        } else if ("even".equals(arg)) {
+        } else if ("even".equals(formula)) {
             step = 2;
             offset = 0;
         } else {
             Matcher stepOffsetM, stepM;
-            if ((stepOffsetM = NthStepOffset.matcher(arg)).matches()) {
+            if ((stepOffsetM = NthStepOffset.matcher(formula)).matches()) {
                 if (stepOffsetM.group(3) != null) // has digits, like 3n+2 or -3n+2
                     step = Integer.parseInt(stepOffsetM.group(1).replaceFirst("^\\+", ""));
                 else // no digits, might be like n+2, or -n+2. if group(2) == "-", it’s -1;
                     step = "-".equals(stepOffsetM.group(2)) ? -1 : 1;
                 offset =
                     stepOffsetM.group(4) != null ? Integer.parseInt(stepOffsetM.group(4).replaceFirst("^\\+", "")) : 0;
-            } else if ((stepM = NthOffset.matcher(arg)).matches()) {
+            } else if ((stepM = NthOffset.matcher(formula)).matches()) {
                 step = 0;
                 offset = Integer.parseInt(stepM.group().replaceFirst("^\\+", ""));
             } else {
-                throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", arg);
+                throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", formula);
             }
         }
+
+        Evaluator ofSelector = null;
+        if (ofIdx >= 0) {
+            if (ofType)
+                throw new Selector.SelectorParseException(
+                    "Could not parse query '%s': 'of S' is only supported by :nth-child() and :nth-last-child()", query);
+            String ofCss = arg.substring(ofIdx + 2).trim(); // skip "of"
+            if (ofCss.isEmpty())
+                throw new Selector.SelectorParseException(
+                    "Could not parse query '%s': :nth-child(An+B of S) requires a selector", query);
+            ofSelector = parse(ofCss); // full grammar: selector lists, combinators, attributes, nested pseudos
+        }
+
+        if (ofSelector != null)
+            return last
+                ? new Evaluator.IsNthLastChildOfSelector(step, offset, ofSelector)
+                : new Evaluator.IsNthChildOfSelector(step, offset, ofSelector);
 
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+    }
+
+    /**
+     Find the index of the {@code of} keyword separating the An+B formula from the of-selector, or -1 if absent.
+     Only searched before any bracket/paren nesting or quote, as the formula itself is a plain arithmetic token.
+     */
+    private static int indexOfOfClause(String arg) {
+        int depth = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < arg.length(); i++) {
+            char c = arg.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (quote != 0) {
+                if (c == '\\') escaped = true;
+                else if (c == quote) quote = 0;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == '[' || c == '(') {
+                depth++;
+            } else if (c == ']' || c == ')') {
+                depth--;
+            } else if (depth == 0 && (c == 'o' || c == 'O') && i + 1 < arg.length()
+                && (arg.charAt(i + 1) == 'f' || arg.charAt(i + 1) == 'F')
+                && i > 0 && Character.isWhitespace(arg.charAt(i - 1))
+                && isOfFollowedByWhitespace(arg, i + 1)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // char at f is the 'f' of 'of'; true if only whitespace follows it before the of-selector starts
+    private static boolean isOfFollowedByWhitespace(String arg, int f) {
+        int j = f + 1;
+        while (j < arg.length() && Character.isWhitespace(arg.charAt(j))) j++;
+        return j > f + 1 && j < arg.length();
     }
 
     private String consumeParens() {
