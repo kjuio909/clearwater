@@ -97,7 +97,8 @@ public class FormElement extends Element {
      * {@code reset} / {@code submit} / {@code image} inputs are excluded;
      * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
-     * falls back to its first non-disabled option. The list is re-queried from the DOM on each call, so changes to
+     * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
+     * {@code optgroup} ancestor, are never submitted. The list is re-queried from the DOM on each call, so changes to
      * the document are reflected. The returned list is a copy of the data, and changes to the contents of the
      * list will not be reflected in the DOM.
      * @return a list of key vals
@@ -121,14 +122,14 @@ public class FormElement extends Element {
                 Elements options = el.select("option[selected]");
                 boolean set = false;
                 for (Element option: options) {
-                    if (option.hasAttr("disabled")) continue; // disabled options are not successful
+                    if (isDisabledOption(option)) continue; // disabled options are not successful
                     data.add(HttpConnection.KeyVal.create(name, option.val()));
                     set = true;
                 }
                 if (!set && !el.hasAttr("multiple")) {
                     // a single select defaults to its first non-disabled option
                     for (Element option : el.select("option")) {
-                        if (!option.hasAttr("disabled")) {
+                        if (!isDisabledOption(option)) {
                             data.add(HttpConnection.KeyVal.create(name, option.val()));
                             break;
                         }
@@ -145,6 +146,19 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     * An option is disabled if it has the {@code disabled} attribute itself, or if it descends from a {@code optgroup}
+     * that does. Evaluated from the live DOM on each call.
+     */
+    private static boolean isDisabledOption(Element option) {
+        if (option.hasAttr("disabled")) return true;
+        for (Element parent = option.parent(); parent != null && !parent.nameIs("select"); parent = parent.parent()) {
+            if (parent.nameIs("optgroup") && parent.hasAttr("disabled"))
+                return true;
+        }
+        return false;
     }
 
     /**

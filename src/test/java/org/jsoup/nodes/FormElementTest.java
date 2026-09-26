@@ -257,6 +257,71 @@ public class FormElementTest {
         assertEquals("two=e", data.get(1).toString()); // no selection: first non-disabled option
     }
 
+    @Test void disabledOptgroupDisablesSelectedOptions() {
+        String html = "<form><select name=multi multiple>" +
+            "<option value=a selected>" +
+            "<optgroup disabled><option value=b selected><option value=c></optgroup>" +
+            "<optgroup><option value=d selected></optgroup>" +
+            "<option value=e selected disabled>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("multi=a", data.get(0).toString());
+        assertEquals("multi=d", data.get(1).toString());
+        // b is in a disabled optgroup; e is disabled itself
+    }
+
+    @Test void singleSelectFallsBackPastDisabledOptgroup() {
+        String html = "<form>" +
+            "<select name=one><optgroup disabled><option value=a selected></optgroup><option value=b></select>" +
+            "<select name=two><optgroup disabled><option value=c><option value=d selected></optgroup></select>" +
+            "<select name=three><optgroup disabled><option value=e selected></optgroup><optgroup><option value=f></optgroup></select>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("one=b", data.get(0).toString()); // selected a is optgroup-disabled: falls back to first enabled
+        assertEquals("three=f", data.get(1).toString());
+        // two has no enabled option at all: the field does not appear
+    }
+
+    @Test void optgroupDisabledChangesAreReflectedOnEachRead() {
+        String html = "<form><select name=sel><optgroup id=g><option value=a selected></optgroup><option value=b></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals("sel=a", form.formData().get(0).toString());
+
+        doc.selectFirst("optgroup").attr("disabled", "");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("sel=b", data.get(0).toString()); // a now disabled via optgroup: falls back
+
+        doc.selectFirst("optgroup").removeAttr("disabled");
+        assertEquals("sel=a", form.formData().get(0).toString());
+
+        // mutating the returned list must not affect subsequent reads
+        data.clear();
+        assertEquals(1, form.formData().size());
+    }
+
+    @Test void legendExceptedSelectStillFiltersDisabledOptgroup() {
+        String html = "<form><fieldset disabled><legend>" +
+            "<select name=s multiple><optgroup disabled><option value=a selected></optgroup><option value=b selected></select>" +
+            "</legend></fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("s=b", data.get(0).toString());
+    }
+
     @Test void disabledFieldsetDisablesDescendantControls() {
         String html = "<form>" +
             "<fieldset disabled><input name=a value=1><select name=b><option value=2></select><textarea name=c>3</textarea></fieldset>" +
