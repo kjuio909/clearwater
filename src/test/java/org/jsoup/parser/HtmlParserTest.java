@@ -2354,14 +2354,15 @@ public class HtmlParserTest {
         String html = "<img multi='&#55357;&#56495;' single='&#128175;' hexsingle='&#x1f4af;'>";
         Document document = Jsoup.parse(html);
         Element img = document.expectFirst("img");
-        assertEquals("\uD83D\uDCAF", img.attr("multi"));
+        // surrogate code points are not valid Unicode scalar values; each is replaced with U+FFFD
+        assertEquals("\uFFFD\uFFFD", img.attr("multi"));
         assertEquals("\uD83D\uDCAF", img.attr("single"));
         assertEquals("\uD83D\uDCAF", img.attr("hexsingle"));
 
-        assertEquals("<img multi=\"\uD83D\uDCAF\" single=\"\uD83D\uDCAF\" hexsingle=\"\uD83D\uDCAF\">", img.outerHtml());
+        assertEquals("<img multi=\"\uFFFD\uFFFD\" single=\"\uD83D\uDCAF\" hexsingle=\"\uD83D\uDCAF\">", img.outerHtml());
 
         img.ownerDocument().outputSettings().charset("ascii");
-        assertEquals("<img multi=\"&#x1f4af;\" single=\"&#x1f4af;\" hexsingle=\"&#x1f4af;\">", img.outerHtml());
+        assertEquals("<img multi=\"&#xfffd;&#xfffd;\" single=\"&#x1f4af;\" hexsingle=\"&#x1f4af;\">", img.outerHtml());
     }
 
     @Test void tableInPInQuirksMode() {

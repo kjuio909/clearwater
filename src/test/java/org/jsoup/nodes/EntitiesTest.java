@@ -219,9 +219,10 @@ public class EntitiesTest {
         assertEquals(escaped1, escaped2);
     }
 
-    @Test void parseHtmlEncodedEmojiMultipoint() {
-        String emoji = Parser.unescapeEntities("&#55357;&#56495;", false); // 💯
-        assertEquals("\uD83D\uDCAF", emoji);
+    @Test void parseHtmlEncodedSurrogatesReplaced() {
+        // surrogate code points are not valid Unicode scalar values; each is replaced with U+FFFD
+        String replaced = Parser.unescapeEntities("&#55357;&#56495;", false);
+        assertEquals("\uFFFD\uFFFD", replaced);
     }
 
     @Test void parseHtmlEncodedEmoji() {

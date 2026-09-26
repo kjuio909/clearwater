@@ -191,7 +191,7 @@ final class Tokeniser {
             }
             // todo: check for extra illegal unicode points as parse errors - described https://html.spec.whatwg.org/multipage/syntax.html#character-references and in Infra
             // The numeric character reference forms described above are allowed to reference any code point excluding U+000D CR, noncharacters, and controls other than ASCII whitespace.
-            if (charval == -1 || charval > 0x10FFFF || (charval == 0 && syntax == Document.OutputSettings.Syntax.html)) {
+            if (charval == -1 || charval > 0x10FFFF || isSurrogate(charval) || (charval == 0 && syntax == Document.OutputSettings.Syntax.html)) {
                 characterReferenceError("character [%s] outside of valid range", charval);
                 codeRef[0] = replacementChar;
             } else {
@@ -244,6 +244,11 @@ final class Tokeniser {
                 return multipointHolder;
             }
         }
+    }
+
+    /** Tests if the codepoint is in the surrogate range, which is not a valid Unicode scalar value. */
+    private static boolean isSurrogate(int codepoint) {
+        return codepoint >= 0xD800 && codepoint <= 0xDFFF;
     }
 
     Token.Tag createTagPending(boolean start) {
