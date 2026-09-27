@@ -74,6 +74,7 @@ import static org.jsoup.internal.Normalizer.lowerCase;
 public class Safelist {
     private static final String All = ":all";
     private static final TagName AllTag = TagName.valueOf(All);
+    private static final TagName ImgTag = TagName.valueOf("img");
     private final Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]
     private final Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.
     private final Map<TagName, Map<AttributeKey, AttributeValue>> enforcedAttributes; // always set these attribute values
@@ -586,7 +587,11 @@ public class Safelist {
      Get the allowed protocol set that governs the individual URLs inside a {@code srcset} attribute on the given
      tag. Because a {@code srcset} value carries multiple candidate URLs, each one is checked against the same
      protocol policy as an ordinary URI attribute: an explicit {@code srcset} policy wins, otherwise the tag's
-     {@code src} policy applies, falling back to the {@code :all} tag in the same order.
+     {@code src} policy applies, falling back to the {@code :all} tag in the same order. A tag that defines no image
+     policy of its own (such as {@code source} inside a {@code picture}) is governed by the {@code img} policy in the
+     same {@code srcset}-then-{@code src} order, so its candidates are accepted and rejected exactly like those of the
+     fallback {@code img}; a bare {@code <source>} outside any picture that the caller configured a policy for is
+     unaffected, as its own policy takes precedence.
      @param tagName the tag carrying the srcset attribute
      @return the allowed protocols (never null; an empty set means no protocol restriction applies)
      */
@@ -600,6 +605,12 @@ public class Safelist {
         if (allowed == null && !tag.equals(AllTag)) {
             allowed = protocolsFor(AllTag, srcset);
             if (allowed == null) allowed = protocolsFor(AllTag, src);
+        }
+        if (allowed == null && !tag.equals(ImgTag) && !tag.equals(AllTag)) {
+            // source (and other picture candidate carriers) have no URL policy of their own, but their candidates are
+            // image addresses: judge them by the same img policy as the fallback img, rather than accepting any scheme.
+            allowed = protocolsFor(ImgTag, srcset);
+            if (allowed == null) allowed = protocolsFor(ImgTag, src);
         }
         return allowed == null ? Collections.emptySet() : allowed;
     }
