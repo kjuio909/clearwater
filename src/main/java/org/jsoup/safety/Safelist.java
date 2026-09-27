@@ -12,6 +12,7 @@ import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.Element;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -556,6 +557,56 @@ public class Safelist {
         if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
             value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
         return value;
+    }
+
+    /**
+     Test if the supplied attribute is structurally allowed on this tag by the safelist, without applying the
+     whole-value protocol check. This is used for attributes whose value is validated piece by piece by the
+     {@link Cleaner} (currently {@code srcset}, whose individual candidate URLs are checked separately); ordinary
+     attributes use {@link #isSafeAttribute(String, Element, Attribute)}.
+     @param tagName tag to consider allowing the attribute in
+     @param el element under test
+     @param attr attribute under test
+     @return true if the attribute is allowed by the tag/attribute configuration, regardless of its value
+     */
+    boolean isAllowedAttribute(String tagName, Element el, Attribute attr) {
+        TagName tag = TagName.valueOf(tagName);
+        AttributeKey key = AttributeKey.valueOf(attr.getKey());
+
+        Set<AttributeKey> okSet = attributes.get(tag);
+        if (okSet != null && okSet.contains(key)) return true;
+        Map<AttributeKey, AttributeValue> enforcedSet = enforcedAttributes.get(tag);
+        if (enforcedSet != null && enforcedSet.containsKey(key)) {
+            return enforcedSet.get(key).equals(AttributeValue.valueOf(attr.getValue()));
+        }
+        return !tagName.equals(All) && isAllowedAttribute(All, el, attr);
+    }
+
+    /**
+     Get the allowed protocol set that governs the individual URLs inside a {@code srcset} attribute on the given
+     tag. Because a {@code srcset} value carries multiple candidate URLs, each one is checked against the same
+     protocol policy as an ordinary URI attribute: an explicit {@code srcset} policy wins, otherwise the tag's
+     {@code src} policy applies, falling back to the {@code :all} tag in the same order.
+     @param tagName the tag carrying the srcset attribute
+     @return the allowed protocols (never null; an empty set means no protocol restriction applies)
+     */
+    Set<Protocol> srcsetProtocols(String tagName) {
+        TagName tag = TagName.valueOf(tagName);
+        AttributeKey srcset = AttributeKey.valueOf("srcset");
+        AttributeKey src = AttributeKey.valueOf("src");
+
+        Set<Protocol> allowed = protocolsFor(tag, srcset);
+        if (allowed == null) allowed = protocolsFor(tag, src);
+        if (allowed == null && !tag.equals(AllTag)) {
+            allowed = protocolsFor(AllTag, srcset);
+            if (allowed == null) allowed = protocolsFor(AllTag, src);
+        }
+        return allowed == null ? Collections.emptySet() : allowed;
+    }
+
+    private Set<Protocol> protocolsFor(TagName tag, AttributeKey key) {
+        Map<AttributeKey, Set<Protocol>> byAttribute = protocols.get(tag);
+        return byAttribute == null ? null : byAttribute.get(key);
     }
 
     private boolean isSafeProtocol(String value, Set<Protocol> protocols) {

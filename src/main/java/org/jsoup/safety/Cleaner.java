@@ -194,11 +194,25 @@ public class Cleaner {
         int numDiscarded = 0;
         Attributes sourceAttrs = sourceEl.attributes();
         for (Attribute sourceAttr : sourceAttrs) {
-            if (safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr)) { // will keep this attr
+            // srcset is structurally allowed like any attribute, but its value holds several candidate URLs which are
+            // validated individually below, so it must not go through the ordinary whole-value protocol test.
+            boolean attrAllowed = SrcsetCleaner.isSrcset(sourceAttr)
+                ? safelist.isAllowedAttribute(sourceTag, sourceEl, sourceAttr)
+                : safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr);
+            if (attrAllowed) { // will keep this attr
                 String key = sourceAttr.getKey();
                 String value = sourceAttr.getValue();
 
-                if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
+                if (SrcsetCleaner.isSrcset(sourceAttr)) {
+                    // validate and rewrite each candidate instead of treating the whole value as one opaque URL
+                    SrcsetCleaner.Result srcset = SrcsetCleaner.clean(sourceEl, value, safelist);
+                    if (srcset.removed) { // no acceptable candidate: remove the attribute, never leave it empty
+                        numDiscarded += 1 + srcset.droppedCandidates;
+                        continue;
+                    }
+                    numDiscarded += srcset.droppedCandidates;
+                    value = srcset.value;
+                } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);
                     if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
                         value = sourceAttr.getValue();

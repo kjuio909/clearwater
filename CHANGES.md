@@ -4,6 +4,7 @@
 
 ### Improvements
 * Added support for the selector `<an+b> of <selector>` syntax in `:nth-child()` and `:nth-last-child()`, e.g. `li:nth-child(2 of .item)` matches an element that is the second `.item` among its element siblings. Positions are 1-based and are counted (or reverse-counted for `:nth-last-child`) only among same-parent element siblings matching the of-selector list, which may include attributes, combinators, and nested pseudos such as `:not()`; non-element nodes do not take positions. Queries without an `of` clause are unchanged.
+* When a `srcset` attribute is allowed through a `Safelist` (e.g. `Safelist.relaxed().addAttributes("img", "srcset")`), the `Cleaner` now validates the attribute candidate by candidate: the value is split per the HTML `srcset` parsing rules (so commas inside `data:` URLs and quoted content are not mistaken for separators), each candidate URL is checked against the same protocol policy as an ordinary `src` URL, and candidates with missing, duplicated, or malformed width/density descriptors are dropped individually. If no candidate survives, the attribute is removed rather than left empty.
 
 ### Bug Fixes
 * Fixed handling of null characters and initial newlines in HTML to better match the HTML spec, including `pre`, `listing`, and `textarea` elements. Leading newlines in these elements' text are preserved when saving and reparsing HTML. [#2616](https://github.com/jhy/jsoup/pull/2616)
