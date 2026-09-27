@@ -336,6 +336,13 @@ final class SrcsetCleaner {
      checked exactly like an ordinary URI attribute such as {@code src}. When relative links are not preserved,
      resolvable candidates are emitted in absolute form.
      </p>
+     <p>
+     With no document base URI there is nothing to resolve a relative reference against, and a path-relative address
+     is ambiguous and dropped. A scheme-less root-relative reference such as {@code /assets/a.png} is unambiguous:
+     it addresses the same path on any origin, carries no scheme that could be smuggled, and is therefore kept
+     verbatim as written rather than being resolved against (and concatenated onto) a fabricated base. A
+     scheme-relative {@code //host} reference is not root-relative and, lacking a scheme to inherit, is dropped.
+     </p>
      @return the URL to keep (absolute or original spelling), or {@code null} if it must be dropped
      */
     private static String isSafeUrl(Element el, String url, Safelist safelist) {
@@ -345,6 +352,8 @@ final class SrcsetCleaner {
         if (protocols.isEmpty()) return url; // no protocol policy: accept, like an ordinary untyped attribute
 
         String resolved = StringUtil.resolve(el.baseUri(), url);
+        if (resolved.isEmpty() && isRootRelativeWithoutBase(el, url))
+            return url; // safe scheme-less root-relative path; keep the exact input, never fabricate/concatenate a base
         String check = resolved;
         if (check.isEmpty() && !StringUtil.hasHttpScheme(url)) check = url; // custom schemes checked as written
         if (check.isEmpty()) return null; // an unresolvable relative URL with no base is not acceptable
@@ -369,6 +378,18 @@ final class SrcsetCleaner {
             if (c <= 0x1f || c == 0x7f) return true;
         }
         return false;
+    }
+
+    /**
+     Whether the address is a scheme-less root-relative path reference that cannot be resolved only because the
+     document has no base URI. Such a reference starts with a single {@code /} (so {@code //host} scheme-relative
+     references and ordinary path-relative references do not qualify) and is safe to keep verbatim: it inherits the
+     embedding origin at request time and contains no scheme that could be smuggled.
+     */
+    private static boolean isRootRelativeWithoutBase(Element el, String url) {
+        if (!el.baseUri().isEmpty() || url.isEmpty() || url.charAt(0) != '/') return false;
+        // a second "/" makes this a scheme-relative "//host" reference, which has no scheme to inherit
+        return url.length() == 1 || url.charAt(1) != '/';
     }
 
     private static String serialize(List<Candidate> candidates) {
