@@ -98,16 +98,18 @@ public class FormElement extends Element {
      * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
      * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
-     * {@code optgroup} ancestor, are never submitted. The list is re-queried from the DOM on each call, so changes to
-     * the document are reflected. The returned list is a copy of the data, and changes to the contents of the
-     * list will not be reflected in the DOM.
+     * {@code optgroup} ancestor, are never submitted. Controls outside the form whose {@code form} attribute equals
+     * this form's {@code id} are included too, merged with the form's own controls in document order (only when this
+     * form is the first element in the document carrying that id). The list is re-queried from the DOM on each call,
+     * so changes to the document are reflected. The returned list is a copy of the data, and changes to the contents
+     * of the list will not be reflected in the DOM.
      * @return a list of key vals
      */
     public List<Connection.KeyVal> formData() {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
+        Elements formEls = formControls();
         for (Element el: formEls) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
             if (isDisabled(el)) continue; // skip disabled form inputs
@@ -146,6 +148,44 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     * Returns the controls that submit with this form: the descendant and parser-linked controls from
+     * {@link #elements()}, unioned with same-document controls whose {@code form} attribute equals this form's
+     * {@code id}, merged in document order. A control that is both a descendant and carries the {@code form}
+     * attribute is included only once. External controls associate only when this form is the first element in the
+     * document with that id (so controls pointing at a missing, non-form, or later duplicate id target are not
+     * absorbed). Recomputed from the live DOM on each call; does not modify the DOM.
+     */
+    private Elements formControls() {
+        Elements els = elements(); // descendant and parser-linked controls
+
+        Document owner = ownerDocument();
+        if (owner == null) return els;
+        String id = attr("id");
+        if (id.isEmpty()) return els; // no id: nothing can point at this form
+        if (owner.getElementById(id) != this) return els; // not the first (or not a form) target of this id
+
+        // find controls elsewhere in the document that point at this form via their form attribute
+        Elements associated = null;
+        for (Element el : owner.select(submittable)) {
+            if (id.equals(el.attr("form")) && !els.contains(el)) {
+                if (associated == null) associated = new Elements();
+                associated.add(el);
+            }
+        }
+        if (associated == null) return els;
+
+        // merge the form's own controls and the associated controls into document order
+        Elements merged = new Elements(els.size() + associated.size());
+        for (Element el : owner.select(submittable)) {
+            if (els.contains(el) || associated.contains(el)) merged.add(el);
+        }
+        for (Element el : els) {
+            if (!merged.contains(el)) merged.add(el); // linked controls not in this document keep their place at the end
+        }
+        return merged;
     }
 
     /**

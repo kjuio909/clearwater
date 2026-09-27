@@ -468,6 +468,152 @@ public class FormElementTest {
         assertEquals("d=1", data.get(2).toString());
     }
 
+    @Test void formAttributeControlsAreIncludedInDocumentOrder() {
+        String html = "<input name=before value=1 form=f>" +
+            "<div><input name=nested value=2 form=f></div>" +
+            "<form id=f><input name=inner1 value=3><input name=inner2 value=4></form>" +
+            "<input name=after value=5 form=f>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(5, data.size());
+        assertEquals("before=1", data.get(0).toString());
+        assertEquals("nested=2", data.get(1).toString());
+        assertEquals("inner1=3", data.get(2).toString());
+        assertEquals("inner2=4", data.get(3).toString());
+        assertEquals("after=5", data.get(4).toString());
+    }
+
+    @Test void formAttributeRequiresMatchingFormId() {
+        String html = "<form><input name=inner value=1></form>" + // no id: absorbs nothing
+            "<input name=ext value=2 form=>" + // empty form attribute: no association
+            "<input name=ext2 value=3 form=missing>"; // target does not exist
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("inner=1", data.get(0).toString());
+    }
+
+    @Test void formAttributeIgnoresOtherAndNonFormTargets() {
+        String html = "<div id=notaform></div>" +
+            "<form id=other></form>" +
+            "<form id=f><input name=inner value=1></form>" +
+            "<input name=toDiv value=2 form=notaform>" + // target is not a form
+            "<input name=toOther value=3 form=other>"; // points at a different form
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form#f");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("inner=1", data.get(0).toString());
+
+        FormElement other = (FormElement) doc.selectFirst("form#other");
+        List<Connection.KeyVal> otherData = other.formData();
+        assertEquals(1, otherData.size());
+        assertEquals("toOther=3", otherData.get(0).toString());
+    }
+
+    @Test void formAttributeAssociatesWithFirstFormOfDuplicateId() {
+        String html = "<form id=dup><input name=first value=1></form>" +
+            "<form id=dup><input name=second value=2></form>" +
+            "<input name=ext value=3 form=dup>";
+        Document doc = Jsoup.parse(html);
+        Elements forms = doc.select("form");
+        assertEquals(2, forms.size());
+
+        List<Connection.KeyVal> firstData = ((FormElement) forms.get(0)).formData();
+        assertEquals(2, firstData.size());
+        assertEquals("first=1", firstData.get(0).toString());
+        assertEquals("ext=3", firstData.get(1).toString());
+
+        List<Connection.KeyVal> secondData = ((FormElement) forms.get(1)).formData();
+        assertEquals(1, secondData.size());
+        assertEquals("second=2", secondData.get(0).toString());
+    }
+
+    @Test void formAttributeControlIsNotDuplicatedWhenAlsoDescendant() {
+        String html = "<form id=f><input name=a value=1 form=f><input name=b value=2></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("a=1", data.get(0).toString());
+        assertEquals("b=2", data.get(1).toString());
+    }
+
+    @Test void formAttributeControlsFollowSuccessfulControlSemantics() {
+        String html = "<form id=f></form>" +
+            "<input name=noname value=x>" + // no form attribute
+            "<input value=x form=f>" + // no name: skipped
+            "<input name=dis value=x form=f disabled>" + // disabled: skipped
+            "<input type=submit name=sub value=x form=f>" + // submit button: skipped
+            "<input type=checkbox name=chk value=x form=f>" + // unchecked: skipped
+            "<input type=checkbox name=chk2 value=y form=f checked>" +
+            "<select name=sel form=f multiple><option value=a selected><option value=b><option value=c selected></select>" +
+            "<textarea name=ta form=f>text</textarea>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(4, data.size());
+        assertEquals("chk2=y", data.get(0).toString());
+        assertEquals("sel=a", data.get(1).toString());
+        assertEquals("sel=c", data.get(2).toString());
+        assertEquals("ta=text", data.get(3).toString());
+    }
+
+    @Test void formAttributeAssociationIsLive() {
+        String html = "<form id=f><input name=inner value=1></form><input name=ext value=2>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element ext = doc.selectFirst("input[name=ext]");
+
+        assertEquals(1, form.formData().size());
+
+        // setting the form attribute associates the control
+        ext.attr("form", "f");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("ext=2", data.get(1).toString());
+
+        // removing the form's id dissociates it
+        form.removeAttr("id");
+        assertEquals(1, form.formData().size());
+
+        // retargeting to a new id reassociates it
+        form.attr("id", "g");
+        assertEquals(1, form.formData().size());
+        ext.attr("form", "g");
+        assertEquals(2, form.formData().size());
+
+        // removing the control from the document drops it
+        ext.remove();
+        data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("inner=1", data.get(0).toString());
+    }
+
+    @Test void formAttributeAssociationSurvivesSerialization() {
+        String html = "<input name=ext value=1 form=f><form id=f><input name=inner value=2></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("ext=1", data.get(0).toString());
+        assertEquals("inner=2", data.get(1).toString());
+
+        Document reparsed = Jsoup.parse(doc.html());
+        FormElement reForm = (FormElement) reparsed.selectFirst("form");
+        List<Connection.KeyVal> reData = reForm.formData();
+        assertEquals(2, reData.size());
+        assertEquals("ext=1", reData.get(0).toString());
+        assertEquals("inner=2", reData.get(1).toString());
+    }
+
     @Test void submitThrowsOnUnresolvableAction() {
         String html = "<form action='not-resolvable-without-base'><input name='q'></form>";
         Document doc = Jsoup.parse(html); // no base URI, so the relative action cannot be made absolute
