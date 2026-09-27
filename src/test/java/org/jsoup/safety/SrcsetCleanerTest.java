@@ -16,6 +16,14 @@ public class SrcsetCleanerTest {
         return Safelist.relaxed().addAttributes("img", "srcset");
     }
 
+    /** The public entry point for responsive-image cleaning: picture/source tags plus srcset on img and source. */
+    private static Safelist pictureSafelist() {
+        return Safelist.relaxed()
+            .addTags("picture", "source")
+            .addAttributes("img", "srcset")
+            .addAttributes("source", "srcset", "media", "type");
+    }
+
     @Test void srcsetRemovedWhenNotAllowed() {
         // without the attribute in the safelist, the existing attribute-removal behavior is unchanged
         String html = "<img src=\"http://example.com/src.jpg\" srcset=\"http://example.com/a.jpg 1x\">";
@@ -441,5 +449,140 @@ public class SrcsetCleanerTest {
             clean.select("img").forEach(img ->
                 assertFalse(img.attr("srcset").toLowerCase().contains("javascript")));
         }
+    }
+
+    // ===== <picture>/<source> candidate coverage =====
+
+    @Test void sourceAndFallbackImgSrcsetAreFilteredWithSameRules() {
+        String html = "<picture>"
+            + "<source media=\"(min-width: 800px)\" srcset=\"/large.jpg 800w, javascript:x 1x\">"
+            + "<img src=\"/fallback.jpg\" srcset=\"/fb.jpg 1x, javascript:y 2x\" alt=\"x\">"
+            + "</picture>";
+        String clean = Jsoup.clean(html, "http://example.com/", pictureSafelist());
+        assertEquals("<picture>"
+            + "<source media=\"(min-width: 800px)\" srcset=\"http://example.com/large.jpg 800w\">"
+            + "<img src=\"http://example.com/fallback.jpg\" srcset=\"http://example.com/fb.jpg 1x\" alt=\"x\">"
+            + "</picture>", clean);
+    }
+
+    @Test void sourceSrcsetIsVerbatimIdenticalToImgSrcsetForSameValue() {
+        String value = "\"http://example.com/a,b.jpg\" 1x, http://example.com/c.jpg 300w, , javascript:bad 2x";
+        Safelist sl = pictureSafelist();
+        String img = Jsoup.clean("<img srcset='" + value + "'>", "http://example.com/", sl);
+        String source = Jsoup.clean("<source srcset='" + value + "'>", "http://example.com/", sl);
+        assertEquals(
+            img.replaceFirst("^<img", "<source").replaceFirst(">$", ">"),
+            source);
+        assertEquals("<source srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 300w\">", source);
+    }
+
+    @Test void nestedPicturesAndEachSourceAreHandledIndependently() {
+        String html = "<picture>"
+            + "<source srcset=\"javascript:a 1x\">"
+            + "<picture>"
+            + "<source type=\"image/webp\" srcset=\"/b.webp 1x, javascript:b 2x\">"
+            + "<source media=\"(m)\" srcset=\"/c.jpg 2x\">"
+            + "</picture>"
+            + "<img src=\"/f.jpg\" srcset=\"/f2.jpg 2x\">"
+            + "</picture>";
+        String clean = Jsoup.clean(html, "http://example.com/", pictureSafelist());
+        // the all-invalid first source loses only its srcset, and is not removed; siblings keep their order/attrs
+        assertEquals("<picture>"
+            + "<source>"
+            + "<picture>"
+            + "<source type=\"image/webp\" srcset=\"http://example.com/b.webp 1x\">"
+            + "<source media=\"(m)\" srcset=\"http://example.com/c.jpg 2x\">"
+            + "</picture>"
+            + "<img src=\"http://example.com/f.jpg\" srcset=\"http://example.com/f2.jpg 2x\">"
+            + "</picture>", clean);
+    }
+
+    @Test void mixedValidInvalidCandidatesOnSourceKeepOrderAndSeparators() {
+        String html = "<source srcset=',, \"/a,b.jpg\" 1x,,, /b.jpg 2x, javascript:bad, \"/c d.jpg\" 3x,'>";
+        String clean = Jsoup.clean(html, "http://example.com/path/", pictureSafelist());
+        // quoted address drops its delimiting quotes; the whitespace-containing quoted address is dropped alone;
+        // empty/leading/trailing commas do not swallow following candidates
+        assertEquals("<source srcset=\"http://example.com/a,b.jpg 1x, http://example.com/b.jpg 2x\">", clean);
+    }
+
+    @Test void unterminatedQuoteOnSourceResyncsAtComma() {
+        String html = "<picture><source media=\"(x)\" srcset='\"http://example.com/a.jpg 1x, http://example.com/b.jpg 2x'>"
+            + "<img src=\"/f.jpg\"></picture>";
+        String clean = Jsoup.clean(html, "http://example.com/", pictureSafelist());
+        assertEquals("<picture><source media=\"(x)\" srcset=\"http://example.com/b.jpg 2x\">"
+            + "<img src=\"http://example.com/f.jpg\"></picture>", clean);
+    }
+
+    @Test void emptyOrAllInvalidSourceSrcsetRemovesOnlyTheAttribute() {
+        Safelist sl = pictureSafelist();
+        String allInvalid = "<picture><source media=\"(m)\" type=\"image/webp\" srcset=\"javascript:x 1x\">"
+            + "<img src=\"/f.jpg\"></picture>";
+        assertEquals("<picture><source media=\"(m)\" type=\"image/webp\">"
+            + "<img src=\"http://example.com/f.jpg\"></picture>",
+            Jsoup.clean(allInvalid, "http://example.com/", sl));
+
+        String empty = "<picture><source media=\"(m)\" srcset=\"   ,, \"><img src=\"/f.jpg\"></picture>";
+        assertEquals("<picture><source media=\"(m)\"><img src=\"http://example.com/f.jpg\"></picture>",
+            Jsoup.clean(empty, "http://example.com/", sl));
+    }
+
+    @Test void sourceTagGatingRemovesTagWhenNotAllowed() {
+        // picture allowed, but source tag not: the source element itself is gone (children/content hoisted per
+        // existing unknown-tag rules), media/type/srcset do not survive on it; img is untouched
+        Safelist sl = Safelist.relaxed().addTags("picture").addAttributes("img", "srcset");
+        String html = "<picture><source media=\"(m)\" type=\"image/webp\" srcset=\"/a.jpg 1x\"><img src=\"/f.jpg\"></picture>";
+        String clean = Jsoup.clean(html, "http://example.com/", sl);
+        assertFalse(clean.contains("<source"), "source must not appear when its tag is not allowed: " + clean);
+        assertFalse(clean.contains("javascript"));
+        assertTrue(clean.contains("<img"));
+    }
+
+    @Test void sourceAllowedButSrcsetNotRemovesOnlySrcset() {
+        Safelist sl = Safelist.relaxed()
+            .addTags("picture", "source")
+            .addAttributes("source", "media", "type")
+            .addAttributes("img", "srcset");
+        String html = "<picture><source media=\"(m)\" type=\"image/webp\" srcset=\"/a.jpg 1x\"><img src=\"/f.jpg\"></picture>";
+        String clean = Jsoup.clean(html, "http://example.com/", sl);
+        assertEquals("<picture><source media=\"(m)\" type=\"image/webp\"><img src=\"http://example.com/f.jpg\"></picture>",
+            clean);
+    }
+
+    @Test void explicitSourceSrcsetProtocolsStillWinOverImgPolicy() {
+        // an explicit policy on source is not overridden by the img fallback; here only data: is allowed on source,
+        // while img keeps http/https
+        Safelist sl = pictureSafelist().addProtocols("source", "srcset", "data");
+        String html = "<source srcset=\"data:text/plain,Hi 1x, http://example.com/a.jpg 2x\">";
+        assertEquals("<source srcset=\"data:text/plain,Hi 1x\">", Jsoup.clean(html, "http://example.com/", sl));
+    }
+
+    @Test void pictureCleaningIsIdempotentAndReparseStable() {
+        String html = "<picture>"
+            + "<source media=\"(min-width: 600px)\" srcset=\"/a.jpg 600w, javascript:x 1x\">"
+            + "<source type=\"image/webp\" srcset=\"/b.webp, /c.webp 2x\">"
+            + "<img src=\"/f.jpg\" srcset=\"/f.jpg 1x, bad\">"
+            + "</picture>";
+        Cleaner cleaner = new Cleaner(pictureSafelist());
+        Document once = cleaner.clean(Jsoup.parseBodyFragment(html, "http://example.com/"));
+        Document twice = cleaner.clean(once);
+        assertEquals(once.body().html(), twice.body().html());
+
+        String onceHtml = once.body().html();
+        Document reparsed = Jsoup.parse(onceHtml);
+        assertEquals(onceHtml, cleaner.clean(reparsed).body().html());
+        assertEquals(2, once.select("source").size());
+        assertEquals("http://example.com/a.jpg 600w", once.expectFirst("source").attr("srcset"));
+    }
+
+    @Test void oneFailingSourceSrcsetDoesNotHalfUpdateOrAffectOthers() {
+        Document dirty = Jsoup.parseBodyFragment(
+            "<picture><source srcset=\"javascript:bad\"><source srcset=\"http://example.com/ok.jpg 1x\">"
+                + "<img srcset=\"http://example.com/img.jpg 2x\"></picture>",
+            "http://example.com/");
+        String original = dirty.expectFirst("source").attr("srcset");
+        Document clean = new Cleaner(pictureSafelist()).clean(dirty);
+        assertEquals(original, dirty.expectFirst("source").attr("srcset"), "input document must not be modified");
+        assertEquals("<picture><source><source srcset=\"http://example.com/ok.jpg 1x\">"
+            + "<img srcset=\"http://example.com/img.jpg 2x\"></picture>", clean.body().html());
     }
 }
