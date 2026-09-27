@@ -59,9 +59,62 @@ public class SrcsetCleanerTest {
         assertEquals("<img srcset=\"/a.jpg 1x, http://example.com/b.jpg 2x\">", clean);
     }
 
-    @Test void dropsUnresolvableRelativeCandidatesWithoutBase() {
-        String clean = Jsoup.clean("<img srcset=\"/a.jpg 1x\">", safelist());
-        assertEquals("<img>", clean);
+    @Test void rootRelativeCandidateIsKeptVerbatimWithoutBase() {
+        // with no document base URI, a safe root-relative reference is preserved as input, never joined to a
+        // fabricated path and never dropped
+        assertEquals("<img srcset=\"/assets/a.png 1x\">",
+            Jsoup.clean("<img srcset=\"/assets/a.png 1x\">", safelist()));
+        assertEquals("<img srcset=\"/assets/a.png\">",
+            Jsoup.clean("<img srcset=\"/assets/a.png\">", safelist()));
+
+        // the bad candidate is dropped on its own; the root-relative one survives, in order
+        assertEquals("<img srcset=\"/assets/a.png 1x\">",
+            Jsoup.clean("<img srcset=\"/assets/a.png 1x, javascript:alert(1) 2x\">", safelist()));
+
+        // the identical value on a source and the fallback img is filtered and serialized verbatim identically
+        Safelist sl = pictureSafelist();
+        String value = "/assets/a.png 1x, javascript:bad 2x";
+        String img = Jsoup.clean("<img srcset='" + value + "'>", sl);
+        String source = Jsoup.clean("<source srcset='" + value + "'>", sl);
+        assertEquals(img.replaceFirst("^<img", "<source"), source);
+        assertEquals("<source srcset=\"/assets/a.png 1x\">", source);
+
+        // no joining against any path: the spelling is byte-for-byte the input reference
+        Document clean = new Cleaner(sl).clean(Jsoup.parseBodyFragment(
+            "<picture><source srcset=\"/a/b.png 2x\"><img srcset=\"/c/d.png 3x\"></picture>"));
+        assertEquals("/a/b.png 2x", clean.expectFirst("source").attr("srcset"));
+        assertEquals("/c/d.png 3x", clean.expectFirst("img").attr("srcset"));
+    }
+
+    @Test void nonRootRelativeCandidatesWithoutBaseAreDropped() {
+        // in-directory relative references cannot be resolved without a base and are not root-relative
+        assertEquals("<img>", Jsoup.clean("<img srcset=\"a.jpg 1x\">", safelist()));
+        assertEquals("<img>", Jsoup.clean("<img srcset=\"assets/a.png 1x\">", safelist()));
+        // a protocol-relative reference inherits an unknown scheme without a base and is not retained
+        assertEquals("<img>", Jsoup.clean("<img srcset=\"//evil.example/a.png 1x\">", safelist()));
+        // mixed: only the unresolvable relative candidate is lost
+        assertEquals("<img srcset=\"/a.png 1x\">",
+            Jsoup.clean("<img srcset=\"a.png 2x, /a.png 1x\">", safelist()));
+    }
+
+    @Test void rootRelativeCandidateWithControlCharIsRejected() {
+        // the root-relative retention never bypasses the control-character / scheme checks
+        assertEquals("<img srcset=\"/ok.png 1x\">",
+            Jsoup.clean("<img srcset=\"/a&#x0a;.png, /ok.png 1x\">", safelist()));
+        assertEquals("<img srcset=\"/ok.png 1x\">",
+            Jsoup.clean("<img srcset=\"/&#x09;x, /ok.png 1x\">", safelist()));
+    }
+
+    @Test void rootRelativeCandidatesSurviveRepeatedCleaningWithoutBase() {
+        Cleaner cleaner = new Cleaner(pictureSafelist());
+        Document once = cleaner.clean(Jsoup.parseBodyFragment(
+            "<picture><source srcset=\"/a.png 1x, javascript:bad\"><img srcset=\"/b.png 2x\"></picture>"));
+        String expected = "<picture><source srcset=\"/a.png 1x\"><img srcset=\"/b.png 2x\"></picture>";
+        assertEquals(expected, once.body().html());
+        assertEquals(expected, cleaner.clean(once).body().html());
+        // serialize, reparse, clean again: structure, order, and values are stable
+        Document reparsed = Jsoup.parse(once.body().html());
+        assertEquals(expected, cleaner.clean(reparsed).body().html());
     }
 
     @Test void dropsJavascriptCandidateAndKeepsRest() {
@@ -476,6 +529,32 @@ public class SrcsetCleanerTest {
         assertEquals("<source srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 300w\">", source);
     }
 
+    @Test void everyEdgeSrcsetValueCleansVerbatimIdenticallyOnSourceAndImg() {
+        // the same value, on either element, must split candidates, handle quote boundaries and character
+        // references, skip consecutive/leading/trailing commas, resync after an unterminated quote, and drop
+        // illegal candidates to a byte-identical result
+        String[] values = {
+            ",, http://example.com/a.jpg 1x,,, http://example.com/b.jpg 2x,",
+            "  ",
+            ",,,",
+            "'http://example.com/a b.jpg' 1x, http://example.com/c.jpg 2x",
+            "\"http://example.com/a,b.jpg\", , http://example.com/c.jpg 2x",
+            "\"http://example.com/a.jpg 1x, http://example.com/b.jpg 2x, http://example.com/c.jpg 3x",
+            "http://example.com/a.jpg 100w 200w, http://example.com/b.jpg 2x, javascript:x 3x",
+            "http://example.com/a?b=1&amp;c=2 1x, http://example.com/d.jpg 0w",
+            "data:text/plain,Hi 1x, http://example.com/a.jpg 2x",
+            "/assets/a.png 1x, /assets/b.png 2x, javascript:z",
+        };
+        Safelist sl = pictureSafelist().addProtocols("source", "srcset", "http", "https")
+            .addProtocols("img", "srcset", "http", "https");
+        for (String value : values) {
+            String img = Jsoup.clean("<img srcset='" + value + "'>", "http://example.com/p/", sl);
+            String source = Jsoup.clean("<source srcset='" + value + "'>", "http://example.com/p/", sl);
+            assertEquals(img.replaceFirst("^<img", "<source"), source,
+                "srcset cleaned differently on source vs img: " + value);
+        }
+    }
+
     @Test void nestedPicturesAndEachSourceAreHandledIndependently() {
         String html = "<picture>"
             + "<source srcset=\"javascript:a 1x\">"
@@ -554,6 +633,110 @@ public class SrcsetCleanerTest {
         Safelist sl = pictureSafelist().addProtocols("source", "srcset", "data");
         String html = "<source srcset=\"data:text/plain,Hi 1x, http://example.com/a.jpg 2x\">";
         assertEquals("<source srcset=\"data:text/plain,Hi 1x\">", Jsoup.clean(html, "http://example.com/", sl));
+    }
+
+    @Test void sourceWithNoOwnPolicyAndImgWhitelistedUsesImgPolicy() {
+        // source has no own or global policy; the fallback img tag is whitelisted with http/https on src, so source
+        // candidates are filtered by that same image policy (this is what makes same-string results identical)
+        Safelist sl = new Safelist()
+            .addTags("img", "source")
+            .addAttributes("img", "src", "srcset")
+            .addAttributes("source", "srcset")
+            .addProtocols("img", "src", "http", "https");
+        String html = "<source srcset=\"http://example.com/a.jpg 1x, javascript:x 2x\">"
+            + "<img srcset=\"http://example.com/b.jpg 1x, javascript:y 2x\">";
+        String clean = Jsoup.clean(html, "http://example.com/", sl);
+        assertEquals("<source srcset=\"http://example.com/a.jpg 1x\">"
+            + "<img srcset=\"http://example.com/b.jpg 1x\">", clean);
+    }
+
+    @Test void sourceNeverBorrowsImgPolicyWhenImgTagIsNotWhitelisted() {
+        // only the source tag is allowed: img policy cannot govern it, and tightening img must not change source
+        Safelist onlySource = new Safelist()
+            .addTags("source")
+            .addAttributes("source", "srcset");
+        String html = "<source srcset=\"http://example.com/a.jpg 1x, javascript:x 2x, /r.png 3x\">";
+        // no own and no global protocol policy: candidates are accepted like an ordinary untyped attribute
+        assertEquals("<source srcset=\"http://example.com/a.jpg 1x, javascript:x 2x, /r.png 3x\">",
+            Jsoup.clean(html, "http://example.com/", onlySource));
+
+        // adding or tightening an img policy leaves source completely untouched (img is not even whitelisted)
+        Safelist withImgPolicy = new Safelist()
+            .addTags("source")
+            .addAttributes("source", "srcset")
+            .addProtocols("img", "src", "https");
+        assertEquals("<source srcset=\"http://example.com/a.jpg 1x, javascript:x 2x, /r.png 3x\">",
+            Jsoup.clean(html, "http://example.com/", withImgPolicy));
+    }
+
+    @Test void onlyImgWhitelistedRemovesSourceEntirely() {
+        Safelist onlyImg = Safelist.relaxed().addAttributes("img", "srcset");
+        String html = "<source srcset=\"http://example.com/a.jpg 1x\"><img srcset=\"http://example.com/b.jpg 1x\">";
+        String clean = Jsoup.clean(html, "http://example.com/", onlyImg);
+        assertFalse(clean.contains("<source"));
+        assertEquals("<img srcset=\"http://example.com/b.jpg 1x\">", clean);
+    }
+
+    @Test void globalProtocolRuleAppliesToBothElements() {
+        // a :all protocol rule governs both source and img when neither declares an own policy
+        Safelist sl = new Safelist()
+            .addTags("img", "source")
+            .addAttributes(":all", "srcset")
+            .addProtocols(":all", "srcset", "http", "https");
+        String html = "<source srcset=\"http://example.com/a.jpg 1x, data:text/plain,x 2x\">"
+            + "<img srcset=\"https://example.com/b.jpg 1x, javascript:y 2x\">";
+        assertEquals("<source srcset=\"http://example.com/a.jpg 1x\">"
+            + "<img srcset=\"https://example.com/b.jpg 1x\">", Jsoup.clean(html, "http://example.com/", sl));
+    }
+
+    @Test void elementSpecificPolicyOverridesGlobalRule() {
+        // :all allows only data:, but img declares its own http/https policy; img wins for its own attribute
+        Safelist sl = new Safelist()
+            .addTags("img")
+            .addAttributes(":all", "srcset")
+            .addAttributes("img", "srcset")
+            .addProtocols(":all", "srcset", "data")
+            .addProtocols("img", "srcset", "http", "https");
+        String html = "<img srcset=\"http://example.com/a.jpg 1x, data:text/plain,x 2x\">";
+        assertEquals("<img srcset=\"http://example.com/a.jpg 1x\">",
+            Jsoup.clean(html, "http://example.com/", sl));
+    }
+
+    @Test void globalRuleTakesPrecedenceOverImgFallbackForSource() {
+        // source has no own policy; a :all rule exists, so it governs source even though the whitelisted img also
+        // defines a policy. :all allows data: only -> source keeps data: and rejects http:.
+        Safelist sl = new Safelist()
+            .addTags("img", "source")
+            .addAttributes(":all", "srcset")
+            .addAttributes("img", "srcset")
+            .addAttributes("source", "srcset")
+            .addProtocols(":all", "srcset", "data")
+            .addProtocols("img", "srcset", "http", "https");
+        String source = Jsoup.clean("<source srcset=\"data:text/plain,Hi 1x, http://example.com/a.jpg 2x\">",
+            "http://example.com/", sl);
+        assertEquals("<source srcset=\"data:text/plain,Hi 1x\">", source);
+        // the img-specific policy still governs img independently
+        String img = Jsoup.clean("<img srcset=\"data:text/plain,Hi 1x, http://example.com/a.jpg 2x\">",
+            "http://example.com/", sl);
+        assertEquals("<img srcset=\"http://example.com/a.jpg 2x\">", img);
+    }
+
+    @Test void tighteningSourcePolicyDoesNotChangeImgAndViceVersa() {
+        // source restricted to https; img keeps the relaxed http/https image policy
+        Safelist sl = pictureSafelist().addProtocols("source", "srcset", "https");
+        String html = "<source srcset=\"http://example.com/a.jpg 1x, https://example.com/b.jpg 2x\">"
+            + "<img srcset=\"http://example.com/c.jpg 1x, https://example.com/d.jpg 2x\">";
+        assertEquals("<source srcset=\"https://example.com/b.jpg 2x\">"
+            + "<img srcset=\"http://example.com/c.jpg 1x, https://example.com/d.jpg 2x\">",
+            Jsoup.clean(html, "https://example.com/", sl));
+
+        // and the reverse: restricting img leaves a source with its own policy completely independent
+        Safelist imgOnly = pictureSafelist()
+            .addProtocols("source", "srcset", "http", "https")
+            .addProtocols("img", "srcset", "https");
+        assertEquals("<source srcset=\"http://example.com/a.jpg 1x, https://example.com/b.jpg 2x\">"
+            + "<img srcset=\"https://example.com/d.jpg 2x\">",
+            Jsoup.clean(html, "https://example.com/", imgOnly));
     }
 
     @Test void pictureCleaningIsIdempotentAndReparseStable() {

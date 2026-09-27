@@ -336,6 +336,13 @@ final class SrcsetCleaner {
      checked exactly like an ordinary URI attribute such as {@code src}. When relative links are not preserved,
      resolvable candidates are emitted in absolute form.
      </p>
+     <p>
+     Without a document base URI there is nothing to resolve against, and no path may be invented: a scheme-less
+     root-relative address (a single leading {@code /}, e.g. {@code /assets/a.png}) carries no unsafe scheme, so it
+     is kept verbatim as input when the policy permits ordinary http(s) references. Scheme-relative ({@code //host}),
+     in-directory relative, and custom-scheme candidates that cannot be resolved are still dropped, as they are with a
+     base URI.
+     </p>
      @return the URL to keep (absolute or original spelling), or {@code null} if it must be dropped
      */
     private static String isSafeUrl(Element el, String url, Safelist safelist) {
@@ -344,7 +351,16 @@ final class SrcsetCleaner {
         Set<Safelist.Protocol> protocols = safelist.srcsetProtocols(el.normalName());
         if (protocols.isEmpty()) return url; // no protocol policy: accept, like an ordinary untyped attribute
 
-        String resolved = StringUtil.resolve(el.baseUri(), url);
+        String baseUri = el.baseUri();
+        String resolved = StringUtil.resolve(baseUri, url);
+        if (resolved.isEmpty()
+            && (baseUri == null || baseUri.isEmpty())
+            && isRootRelative(url)
+            && permitsHttp(protocols)) {
+            // No document base: a root-relative reference has no scheme to test and must never be joined against a
+            // fabricated path; keep the input spelling. Anything else unresolvable falls through and is rejected.
+            return url;
+        }
         String check = resolved;
         if (check.isEmpty() && !StringUtil.hasHttpScheme(url)) check = url; // custom schemes checked as written
         if (check.isEmpty()) return null; // an unresolvable relative URL with no base is not acceptable
@@ -361,6 +377,23 @@ final class SrcsetCleaner {
             }
         }
         return null;
+    }
+
+    /**
+     A scheme-less root-relative reference: exactly one leading slash. A protocol-relative reference (two leading
+     slashes) inherits whatever scheme the context supplies and is not root-relative, so it is not retained.
+     */
+    private static boolean isRootRelative(String url) {
+        return url.length() >= 2 && url.charAt(0) == '/' && url.charAt(1) != '/';
+    }
+
+    /** Whether the policy would accept an ordinary same-origin http(s) reference, as a root-relative address becomes. */
+    private static boolean permitsHttp(Set<Safelist.Protocol> protocols) {
+        for (Safelist.Protocol protocol : protocols) {
+            String prot = Normalizer.lowerCase(protocol.toString());
+            if (prot.equals("http") || prot.equals("https")) return true;
+        }
+        return false;
     }
 
     private static boolean containsControlChar(String url) {

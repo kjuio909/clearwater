@@ -584,13 +584,20 @@ public class Safelist {
 
     /**
      Get the allowed protocol set that governs the individual URLs inside a {@code srcset} attribute on the given
-     tag. Because a {@code srcset} value carries multiple candidate URLs, each one is checked against the same
-     protocol policy as an ordinary URI attribute: an explicit {@code srcset} policy wins, otherwise the tag's
-     {@code src} policy applies. A {@code source} element inside a {@code picture} is an alternative to the
-     fallback {@code img}, so a {@code source} with no policy of its own is then judged by the {@code img} tag's
-     {@code srcset}/{@code src} policy; this keeps a {@code source} srcset and the fallback {@code img} srcset in
-     the same picture under identical candidate rules. Resolution finally falls back to the {@code :all} tag in the
-     same order.
+     tag. Because a {@code srcset} value carries multiple candidate URLs, each one is checked against a protocol
+     policy in a fixed, stable order:
+     <ol>
+     <li>the tag's own explicit {@code srcset} policy;</li>
+     <li>the tag's own {@code src} policy;</li>
+     <li>the global {@code :all} {@code srcset}, then {@code src}, policy &mdash; but only when the tag declares no
+     policy of its own;</li>
+     <li>for a {@code source} element only, the fallback {@code img} tag's {@code srcset}/{@code src} policy, and only
+     when the {@code img} tag is itself whitelisted (a {@code source} inside a {@code picture} is an alternative to
+     that whitelisted fallback {@code img}).</li>
+     </ol>
+     A policy configured for one element can never widen or narrow another element: {@code source} never borrows an
+     {@code img} policy that the safelist does not also whitelist {@code img} to carry, and {@code img} is never
+     affected by {@code source} policy.
      @param tagName the tag carrying the srcset attribute
      @return the allowed protocols (never null; an empty set means no protocol restriction applies)
      */
@@ -601,15 +608,16 @@ public class Safelist {
 
         Set<Protocol> allowed = protocolsFor(tag, srcset);
         if (allowed == null) allowed = protocolsFor(tag, src);
-        if (allowed == null && tag.equals(SourceTag)) {
-            // no policy of the <source>'s own: apply the fallback <img> policy so that candidates are filtered
-            // identically on the source and the img within one picture
-            allowed = protocolsFor(ImgTag, srcset);
-            if (allowed == null) allowed = protocolsFor(ImgTag, src);
-        }
         if (allowed == null && !tag.equals(AllTag)) {
+            // global rules apply only when the tag declares no policy of its own
             allowed = protocolsFor(AllTag, srcset);
             if (allowed == null) allowed = protocolsFor(AllTag, src);
+        }
+        if (allowed == null && tag.equals(SourceTag) && tagNames.contains(ImgTag)) {
+            // no own or global policy, and the fallback <img> tag is actually whitelisted: judge the <source>
+            // candidates by the same image policy so a source and the fallback img in one picture match
+            allowed = protocolsFor(ImgTag, srcset);
+            if (allowed == null) allowed = protocolsFor(ImgTag, src);
         }
         return allowed == null ? Collections.emptySet() : allowed;
     }
