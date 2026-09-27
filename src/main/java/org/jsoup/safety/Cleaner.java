@@ -1,6 +1,7 @@
 package org.jsoup.safety;
 
 import org.jsoup.helper.Validate;
+import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.DataNode;
@@ -198,7 +199,16 @@ public class Cleaner {
                 String key = sourceAttr.getKey();
                 String value = sourceAttr.getValue();
 
-                if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
+                if (key.equalsIgnoreCase(SrcsetAttr)) { // srcset: validate and filter each candidate URL individually
+                    SrcsetClean srcset = cleanSrcset(sourceTag, sourceEl, value);
+                    if (srcset.value == null) { // no safe candidates remain; drop the attribute
+                        numDiscarded++;
+                        continue;
+                    }
+                    if (srcset.dropped)
+                        numDiscarded++;
+                    value = srcset.value;
+                } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);
                     if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
                         value = sourceAttr.getValue();
@@ -232,6 +242,52 @@ public class Cleaner {
         }
         dest.attributes().addAll(destAttrs); // re-attach, if removed in clear
         return new ElementMeta(dest, numDiscarded);
+    }
+
+    private static final String SrcsetAttr = "srcset";
+
+    /**
+     Cleans a {@code srcset} attribute value: parses it into image candidates, drops candidates whose URL is not
+     allowed by the safelist (or whose descriptors are invalid), and rebuilds the value from the remaining candidates,
+     in source order. The input value is not modified; the rebuilt value is only returned once fully assembled, so a
+     failure can never leave a half-updated candidate list.
+     @return the cleaned value and whether any candidate was dropped; a null value if no candidates remain
+     */
+    private SrcsetClean cleanSrcset(String sourceTag, Element sourceEl, String value) {
+        SrcsetParser.Result parsed = SrcsetParser.parse(value);
+        boolean dropped = parsed.dropped;
+        boolean makeAbs = safelist.shouldAbsSrcset(sourceTag);
+        String baseUri = sourceEl.baseUri();
+
+        StringBuilder sb = new StringBuilder(value.length());
+        for (SrcsetParser.Candidate candidate : parsed.candidates) {
+            String url = candidate.url;
+            if (!safelist.isSafeSrcsetUrl(sourceTag, sourceEl, url)) {
+                dropped = true;
+                continue;
+            }
+            if (makeAbs) {
+                String abs = StringUtil.resolve(baseUri, url);
+                if (!abs.isEmpty())
+                    url = abs;
+            }
+            if (sb.length() > 0)
+                sb.append(", ");
+            sb.append(url);
+            for (String descriptor : candidate.descriptors)
+                sb.append(' ').append(descriptor);
+        }
+        return new SrcsetClean(sb.length() > 0 ? sb.toString() : null, dropped);
+    }
+
+    private static class SrcsetClean {
+        final String value; // null if no candidates remain
+        final boolean dropped; // true if any candidate was dropped
+
+        SrcsetClean(String value, boolean dropped) {
+            this.value = value;
+            this.dropped = dropped;
+        }
     }
 
     private static class ElementMeta {

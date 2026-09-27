@@ -44,6 +44,13 @@ import static org.jsoup.internal.Normalizer.lowerCase;
  <li>{@link #addProtocols(String tagName, String attribute, String... protocols)}
  </ul>
  <p>
+ The {@code srcset} attribute (which contains a list of image candidate URLs) gets special handling in the
+ {@link Cleaner} when allowed: the attribute value is parsed into its candidates, and each candidate URL is validated
+ against the protocols configured for {@code srcset} (falling back to those configured for {@code src}). Candidates
+ that fail validation, or that have invalid descriptors, are removed individually; if none remain, the attribute is
+ removed.
+ </p>
+ <p>
  You can remove any setting from an existing safelist with:
  </p>
  <ul>
@@ -533,6 +540,8 @@ public class Safelist {
 
         Set<AttributeKey> okSet = attributes.get(tag);
         if (okSet != null && okSet.contains(key)) {
+            if (key.equals(SrcsetKey))
+                return true; // a srcset holds multiple URLs; each candidate is validated individually by the Cleaner
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test
@@ -605,6 +614,57 @@ public class Safelist {
 
     private static boolean isValidAnchor(String value) {
         return value.startsWith("#") && !value.matches(".*\\s.*");
+    }
+
+    private static final AttributeKey SrcsetKey = AttributeKey.valueOf("srcset");
+    private static final AttributeKey SrcKey = AttributeKey.valueOf("src");
+
+    /**
+     Tests if a URL found within a {@code srcset} attribute is allowed by this safelist. The URL is resolved against
+     the element's base URI and tested against the protocols configured for the {@code srcset} attribute, falling back
+     to those configured for {@code src} if none are set for {@code srcset}. If no protocols apply, any URL is allowed.
+     @param tagName the tag the srcset attribute is on
+     @param el the element under test, to resolve relative URLs against its base URI
+     @param url the candidate URL to test
+     @return true if the URL is allowed
+     */
+    boolean isSafeSrcsetUrl(String tagName, Element el, String url) {
+        Set<Protocol> protocolSet = srcsetProtocols(tagName);
+        if (protocolSet == null) return true;
+
+        String value = StringUtil.resolve(el.baseUri(), url);
+        if (value.isEmpty() && !StringUtil.hasHttpScheme(url))
+            value = url; // if it could not be made abs, run as-is to allow custom unknown protocols
+        return isSafeProtocol(value, protocolSet);
+    }
+
+    /**
+     Check if the URLs in a {@code srcset} attribute should be normalized to absolute URLs in the cleaned output.
+     Mirrors the {@link #shouldAbsUrl(String, String)} rule, using the protocols effective for srcset.
+     */
+    boolean shouldAbsSrcset(String tagName) {
+        return !preserveRelativeLinks && srcsetProtocols(tagName) != null;
+    }
+
+    /**
+     Finds the protocols effective for a {@code srcset} attribute on the given tag: those configured for
+     {@code srcset}, falling back to those for {@code src} (including via the {@code :all} pseudo tag).
+     @return the effective protocols, or null if none are configured
+     */
+    private Set<Protocol> srcsetProtocols(String tagName) {
+        TagName tag = TagName.valueOf(tagName);
+        Set<Protocol> protocolSet = findProtocols(tag, SrcsetKey);
+        if (protocolSet == null) protocolSet = findProtocols(tag, SrcKey);
+        if (protocolSet == null && !tag.equals(AllTag)) {
+            protocolSet = findProtocols(AllTag, SrcsetKey);
+            if (protocolSet == null) protocolSet = findProtocols(AllTag, SrcKey);
+        }
+        return protocolSet;
+    }
+
+    private Set<Protocol> findProtocols(TagName tag, AttributeKey key) {
+        Map<AttributeKey, Set<Protocol>> byAttr = protocols.get(tag);
+        return byAttr != null ? byAttr.get(key) : null;
     }
 
     /**

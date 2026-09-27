@@ -701,4 +701,162 @@ public class CleanerTest {
         String input = "<style></t</style><img>";
         assertEquals("<style></t</style>", Jsoup.clean(input, policy));
     }
+
+    private static Safelist srcsetSafelist() {
+        return Safelist.relaxed().addAttributes("img", "srcset");
+    }
+
+    @Test void srcsetKeptWhenAllowed() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset='https://example.com/a.png 1x, https://example.com/b.png 2x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/a.png 1x, https://example.com/b.png 2x\">", cleanHtml);
+    }
+
+    @Test void srcsetRemovedWhenNotAllowed() {
+        // without srcset in the safelist, the attribute is simply removed (existing behavior)
+        String h = "<img srcset='https://example.com/a.png 1x, https://example.com/b.png 2x'>";
+        String cleanHtml = Jsoup.clean(h, Safelist.relaxed());
+        assertEquals("<img>", cleanHtml);
+    }
+
+    @Test void srcsetDropsUnsafeProtocols() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset='javascript:alert(1) 1x, https://example.com/b.png 2x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/b.png 2x\">", cleanHtml);
+    }
+
+    @Test void srcsetRemovedWhenAllCandidatesDropped() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset='javascript:alert(1) 1x, data:image/png;base64,AAAA 2x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img>", cleanHtml); // no empty srcset attribute left behind
+    }
+
+    @Test void srcsetDataUrlWithCommaIsOneCandidate() {
+        // the comma in a data: URL does not split candidates; the whole candidate is dropped (data: not allowed)
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset='data:image/png;base64,iVBORw0KGgo= 2x, https://example.com/b.png 2x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/b.png 2x\">", cleanHtml);
+
+        // and is kept if data: is allowed
+        Safelist dataOk = srcsetSafelist().addProtocols("img", "srcset", "http", "https", "data");
+        String kept = Jsoup.clean(h, dataOk);
+        assertEquals("<img srcset=\"data:image/png;base64,iVBORw0KGgo= 2x, https://example.com/b.png 2x\">", kept);
+    }
+
+    @Test void srcsetHandlesLooseCommas() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset=',, https://example.com/a.png 1x,,, https://example.com/b.png 2x, ,'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/a.png 1x, https://example.com/b.png 2x\">", cleanHtml);
+    }
+
+    @Test void srcsetDropsInvalidDescriptors() {
+        Safelist safelist = srcsetSafelist();
+        // each of these has a single candidate with a bad descriptor, so the attribute is removed
+        String[] bad = {
+            "https://example.com/a.png 100w 200w", // duplicate width
+            "https://example.com/a.png 100w 2x", // width and density
+            "https://example.com/a.png 2x 2x", // duplicate density
+            "https://example.com/a.png w", // missing value
+            "https://example.com/a.png x", // missing value
+            "https://example.com/a.png 100", // no descriptor suffix
+            "https://example.com/a.png 0w", // zero width
+            "https://example.com/a.png 0x", // zero density
+            "https://example.com/a.png -1x", // negative density
+            "https://example.com/a.png 1.5.2x", // malformed number
+            "https://example.com/a.png 100W", // descriptors are case-sensitive
+            "https://example.com/a.png 100h", // h descriptors unsupported
+        };
+        for (String srcset : bad) {
+            String cleanHtml = Jsoup.clean("<img srcset='" + srcset + "'>", safelist);
+            assertEquals("<img>", cleanHtml, srcset);
+        }
+
+        // a bad candidate does not swallow following good ones
+        String h = "<img srcset='https://example.com/a.png 0w, https://example.com/b.png 2x'>";
+        assertEquals("<img srcset=\"https://example.com/b.png 2x\">", Jsoup.clean(h, safelist));
+    }
+
+    @Test void srcsetKeepsValidDescriptors() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<img srcset='https://example.com/a.png, https://example.com/b.png 640w, https://example.com/c.png 1.5x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals(
+            "<img srcset=\"https://example.com/a.png, https://example.com/b.png 640w, https://example.com/c.png 1.5x\">",
+            cleanHtml);
+    }
+
+    @Test void srcsetResolvesRelativeUrls() {
+        Safelist safelist = srcsetSafelist();
+        Document dirty = Jsoup.parse("<img srcset='a.png 1x, /b.png 2x'>", "https://example.com/sub/");
+        String cleanHtml = new Cleaner(safelist).clean(dirty).body().html();
+        assertEquals("<img srcset=\"https://example.com/sub/a.png 1x, https://example.com/b.png 2x\">", cleanHtml);
+
+        // preserved when configured
+        Safelist preserve = srcsetSafelist().preserveRelativeLinks(true);
+        String preserved = new Cleaner(preserve).clean(dirty).body().html();
+        assertEquals("<img srcset=\"a.png 1x, /b.png 2x\">", preserved);
+    }
+
+    @Test void srcsetRelativeUrlWithoutBaseIsDropped() {
+        // mirrors src handling: a relative URL that cannot be resolved fails the protocol check
+        Safelist safelist = srcsetSafelist();
+        String cleanHtml = Jsoup.clean("<img srcset='a.png 1x'>", safelist);
+        assertEquals("<img>", cleanHtml);
+    }
+
+    @Test void srcsetDisguisedProtocolsRejected() {
+        Safelist safelist = srcsetSafelist();
+        String[] bad = {
+            "JAVAscript:alert(1) 1x", // case variation
+            "  javascript:alert(1) 1x  ", // surrounding whitespace
+            "java&#9;script:alert(1) 1x", // entity-encoded control char splits the scheme
+            "java&#1;script:alert(1) 1x", // control char inside the scheme
+            "&#106;avascript:alert(1) 1x", // entity-encoded scheme
+        };
+        for (String srcset : bad) {
+            String cleanHtml = Jsoup.clean("<img srcset='" + srcset + "'>", safelist);
+            assertEquals("<img>", cleanHtml, srcset);
+        }
+    }
+
+    @Test void srcsetSrcsetProtocolsTakePrecedence() {
+        // protocols configured for srcset itself win over the src fallback
+        Safelist safelist = srcsetSafelist().addProtocols("img", "srcset", "https");
+        String h = "<img srcset='http://example.com/a.png 1x, https://example.com/b.png 2x'>";
+        String cleanHtml = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/b.png 2x\">", cleanHtml);
+    }
+
+    @Test void srcsetCleanIsIdempotentAndDoesNotModifyInput() {
+        Safelist safelist = srcsetSafelist();
+        String h = "<p>One</p><img src='https://example.com/s.png' srcset='javascript:alert(1) 1x, https://example.com/a.png 1x,, https://example.com/b.png 0w, https://example.com/c.png 2x'><p>Two</p>";
+        Document dirty = Jsoup.parse(h);
+        String before = dirty.html();
+
+        Cleaner cleaner = new Cleaner(safelist);
+        Document clean = cleaner.clean(dirty);
+        String expected =
+            "<p>One</p><img src=\"https://example.com/s.png\" srcset=\"https://example.com/a.png 1x, https://example.com/c.png 2x\"><p>Two</p>";
+        assertEquals(expected, TextUtil.stripNewlines(clean.body().html()));
+
+        // input document is unchanged
+        assertEquals(before, dirty.html());
+
+        // cleaning again (and cleaning the output) gives the same result
+        assertEquals(expected, TextUtil.stripNewlines(cleaner.clean(dirty).body().html()));
+        assertEquals(expected, TextUtil.stripNewlines(cleaner.clean(clean).body().html()));
+    }
+
+    @Test void srcsetValidity() {
+        Safelist safelist = srcsetSafelist();
+        Cleaner cleaner = new Cleaner(safelist);
+        assertTrue(cleaner.isValid(Jsoup.parse("<img srcset='https://example.com/a.png 1x'>")));
+        assertFalse(cleaner.isValid(Jsoup.parse("<img srcset='javascript:alert(1) 1x'>")));
+        assertFalse(cleaner.isValid(Jsoup.parse("<img srcset='https://example.com/a.png 0w'>")));
+    }
 }

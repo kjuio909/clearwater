@@ -3,6 +3,7 @@
 ## 1.23.3 (Pending)
 
 ### Improvements
+* Added support for cleaning the `srcset` attribute in the `Cleaner`. When `srcset` is allowed by the `Safelist` (e.g. `Safelist.relaxed().addAttributes("img", "srcset")`), the attribute value is parsed into its image candidates, and each candidate URL is validated against the protocols configured for `srcset` (falling back to those of `src`). Candidates with disallowed URLs or invalid descriptors are dropped individually; if none remain, the attribute is removed.
 * Added support for the selector `<an+b> of <selector>` syntax in `:nth-child()` and `:nth-last-child()`, e.g. `li:nth-child(2 of .item)` matches an element that is the second `.item` among its element siblings. Positions are 1-based and are counted (or reverse-counted for `:nth-last-child`) only among same-parent element siblings matching the of-selector list, which may include attributes, combinators, and nested pseudos such as `:not()`; non-element nodes do not take positions. Queries without an `of` clause are unchanged.
 
 ### Bug Fixes
