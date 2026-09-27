@@ -13,7 +13,9 @@ import org.jsoup.select.Selector;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * An HTML Form Element provides ready access to the form fields/controls that are associated with it. It also allows a
@@ -61,6 +63,42 @@ public class FormElement extends Element {
         return this;
     }
 
+    /**
+     * Resolve the controls that submit with this form, in document order.
+     * <p>In addition to descendant controls (and controls linked to this form at parse time), this includes controls
+     * anywhere else in the same Document whose {@code form} attribute references this form's {@code id}, per the
+     * HTML form-association rules. A control carrying a {@code form} attribute belongs solely to its referenced form:
+     * a descendant with a {@code form} attribute pointing elsewhere is excluded, and an unresolvable reference (no
+     * such id, or the target is not a form) associates it with nothing. When several forms share an id, only the
+     * first such form in document order absorbs externally-associated controls. Computed fresh from the live DOM on
+     * every call; the form must have a non-empty id to absorb any external controls.</p>
+     */
+    private Elements formControls() {
+        Document doc = ownerDocument();
+        if (doc == null)
+            return elements(); // a detached form has no document to resolve external associations against
+
+        String id = id();
+        // Per the HTML spec, a form attribute resolves to the first element in tree order with that id, and only
+        // associates when that element is a form. So this form absorbs external controls solely when it itself is
+        // that first element: a missing id, a non-form target, another form, or an earlier same-id form all fail.
+        boolean absorbsExternals = id.length() > 0 && doc.getElementById(id) == this;
+
+        Set<Element> descendants = new HashSet<>(this.getAllElements());
+        Set<Element> linked = new HashSet<>(linkedEls);
+        Elements controls = new Elements();
+        for (Element el : doc.getAllElements()) { // a single document-order pass merges descendants and external controls
+            if (!el.tag().isFormSubmittable()) continue;
+            boolean belongs;
+            if (el.hasAttr("form")) // an explicit association decides, even for descendants (form="" resolves to nothing)
+                belongs = absorbsExternals && el.attr("form").equals(id);
+            else
+                belongs = descendants.contains(el) || linked.contains(el); // implicit: descendant, or linked at parse time
+            if (belongs) controls.add(el);
+        }
+        return controls;
+    }
+
     @Override
     protected void removeChild(Node out) {
         super.removeChild(out);
@@ -98,8 +136,15 @@ public class FormElement extends Element {
      * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
      * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
-     * {@code optgroup} ancestor, are never submitted. The list is re-queried from the DOM on each call, so changes to
-     * the document are reflected. The returned list is a copy of the data, and changes to the contents of the
+     * {@code optgroup} ancestor, are never submitted.
+     * <p>In addition to the form's descendant controls, controls elsewhere in the same Document that carry a
+     * {@code form} attribute whose value is this form's {@code id} are submitted as well (matching the browser's
+     * <a href="https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#association-of-controls-and-forms">
+     * form-associated elements</a> rules). All controls are merged in document order. A control with a {@code form}
+     * attribute is handled solely by that explicit association, even when it is also a descendant: an unresolvable
+     * value (no such id, the target is not a form, or an earlier form in the Document shares this id) excludes it.
+     * Forms without an id absorb no external controls.</p>
+     * The list is re-queried from the DOM on each call, so changes to the document are reflected. The returned list is a copy of the data, and changes to the contents of the
      * list will not be reflected in the DOM.
      * @return a list of key vals
      */
@@ -107,8 +152,7 @@ public class FormElement extends Element {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
-        for (Element el: formEls) {
+        for (Element el: formControls()) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
             if (isDisabled(el)) continue; // skip disabled form inputs
             String name = el.attr("name");

@@ -496,4 +496,284 @@ public class FormElementTest {
         assertEquals("http://example.com/page", con.request().url().toExternalForm());
         assertEquals(Connection.Method.GET, con.request().method());
     }
+
+    @Test void externalControlWithFormAttrIsSubmitted() {
+        String html = "<input name='before' value='1' form='f'>" +
+            "<form id='f'><input name='inside' value='2'></form>" +
+            "<div><input name='after' value='3' form='f'></div>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("before=1", data.get(0).toString()); // external before the form
+        assertEquals("inside=2", data.get(1).toString());
+        assertEquals("after=3", data.get(2).toString()); // external, nested in a div after the form
+    }
+
+    @Test void externalControlsCoverAllControlTypesAndPreserveMultiValues() {
+        String html = "<form id='f'><input name='text' value='t'></form>" +
+            "<input type='hidden' name='hid' value='h' form='f'>" +
+            "<textarea name='area' form='f'>txt</textarea>" +
+            "<select name='multi' multiple form='f'><option value='a' selected><option value='b' selected></select>" +
+            "<input name='dup' value='' form='f'><input name='dup' value='x' form='f'>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(7, data.size()); // empty values and duplicate names are not merged
+        assertEquals("text=t", data.get(0).toString());
+        assertEquals("hid=h", data.get(1).toString());
+        assertEquals("area=txt", data.get(2).toString());
+        assertEquals("multi=a", data.get(3).toString()); // multi options in document order
+        assertEquals("multi=b", data.get(4).toString());
+        assertEquals("dup=", data.get(5).toString());
+        assertEquals("dup=x", data.get(6).toString());
+    }
+
+    @Test void formWithoutIdAbsorbsNoExternalControls() {
+        String html = "<form><input name='inside' value='1'></form><input name='out' value='2' form='f'>" +
+            "<form id=''><input name='inside2' value='3'></form>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        List<Connection.KeyVal> data1 = forms.get(0).formData();
+        assertEquals(1, data1.size());
+        assertEquals("inside=1", data1.get(0).toString());
+
+        List<Connection.KeyVal> data2 = forms.get(1).formData(); // empty id
+        assertEquals(1, data2.size());
+        assertEquals("inside2=3", data2.get(0).toString());
+    }
+
+    @Test void invalidFormReferencesAreSafelyIgnored() {
+        String html = "<form id='f'><input name='ok' value='1'></form>" +
+            "<input name='missing' value='2' form='nope'>" +
+            "<input type='submit' name='btn' value='go' form='f'>" + // submit still excluded
+            "<input name='noname' value='3' form='f' disabled>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = assertDoesNotThrow(form::formData);
+
+        assertEquals(1, data.size());
+        assertEquals("ok=1", data.get(0).toString()); // valid descendants still submit
+    }
+
+    @Test void formAttributePointingAtNonFormTargetIsIgnored() {
+        String html = "<div id='f'></div>" +
+            "<form id='f'><input name='inside' value='1'></form>" +
+            "<input name='out' value='2' form='f'>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.select("form").first();
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("inside=1", data.get(0).toString()); // the div wins the id; form absorbs nothing external
+    }
+
+    @Test void externalControlGoesToReferencedFormOnly() {
+        String html = "<form id='a'><input name='a1' value='1'></form>" +
+            "<form id='b'><input name='b1' value='2'></form>" +
+            "<input name='x' value='3' form='b'>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        List<Connection.KeyVal> dataA = forms.get(0).formData();
+        assertEquals(1, dataA.size());
+        assertEquals("a1=1", dataA.get(0).toString());
+
+        List<Connection.KeyVal> dataB = forms.get(1).formData();
+        assertEquals(2, dataB.size());
+        assertEquals("b1=2", dataB.get(0).toString());
+        assertEquals("x=3", dataB.get(1).toString());
+    }
+
+    @Test void externalControlInsideAnotherFormFollowsExplicitReference() {
+        String html = "<form id='a'></form>" +
+            "<form id='b'><input name='x' value='1' form='a'></form>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        assertEquals(1, forms.get(0).formData().size()); // explicit association overrides parser nesting
+        assertEquals("x=1", forms.get(0).formData().get(0).toString());
+        assertEquals(0, forms.get(1).formData().size());
+    }
+
+    @Test void descendantWithFormAttrElsewhereIsExcluded() {
+        String html = "<form id='f'><input name='keep' value='1'><input name='gone' value='2' form='other'></form>" +
+            "<form id='other'></form>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        List<Connection.KeyVal> data = forms.get(0).formData();
+        assertEquals(1, data.size());
+        assertEquals("keep=1", data.get(0).toString());
+
+        List<Connection.KeyVal> other = forms.get(1).formData();
+        assertEquals(1, other.size());
+        assertEquals("gone=2", other.get(0).toString());
+    }
+
+    @Test void emptyFormAttributeResolvesToNothing() {
+        String html = "<form id='f'><input name='a' value='1'><input name='b' value='2' form=''></form>" +
+            "<input name='c' value='3' form=''>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size()); // an explicit empty form attribute associates with nothing, even for descendants
+        assertEquals("a=1", data.get(0).toString());
+    }
+
+    @Test void descendantWithFormAttrToOwnFormIsNotDuplicated() {        String html = "<form id='f'><input name='a' value='1' form='f'><input name='b' value='2'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("a=1", data.get(0).toString());
+        assertEquals("b=2", data.get(1).toString());
+    }
+
+    @Test void duplicateFormIdsOnlyFirstAbsorbsExternalControls() {
+        String html = "<form id='f'><input name='a' value='1'></form>" +
+            "<form id='f'><input name='b' value='2'></form>" +
+            "<input name='x' value='3' form='f'>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        List<Connection.KeyVal> first = forms.get(0).formData();
+        assertEquals(2, first.size());
+        assertEquals("a=1", first.get(0).toString());
+        assertEquals("x=3", first.get(1).toString());
+
+        List<Connection.KeyVal> second = forms.get(1).formData();
+        assertEquals(1, second.size());
+        assertEquals("b=2", second.get(0).toString());
+    }
+
+    @Test void associationsAreRecomputedFromLiveDomOnEachCall() {
+        String html = "<form id='f'><input name='a' value='1'></form>" +
+            "<input id='ext' name='x' value='2' form='f' type='checkbox'>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element ext = doc.selectFirst("#ext");
+
+        assertEquals(1, form.formData().size()); // x is an unchecked checkbox, so only a submits
+
+        // checkbox semantics apply to external controls too
+        ext.attr("checked", "");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("x=2", data.get(1).toString());
+
+        // changing the form attribute immediately dissociates / reassociates
+        ext.attr("form", "nope");
+        assertEquals(1, form.formData().size());
+        ext.attr("form", "f");
+        assertEquals(2, form.formData().size());
+
+        // removing the form's id stops absorption immediately
+        form.removeAttr("id");
+        assertEquals(1, form.formData().size());
+        form.attr("id", "f");
+        assertEquals(2, form.formData().size());
+
+        // name / disabled / type changes are honored immediately
+        ext.removeAttr("checked");
+        ext.attr("name", "");
+        assertEquals(1, form.formData().size());
+        ext.attr("name", "x");
+        ext.attr("disabled", "");
+        assertEquals(1, form.formData().size());
+        ext.removeAttr("disabled");
+        ext.attr("type", "reset");
+        assertEquals(1, form.formData().size());
+        ext.attr("type", "text");
+        assertEquals(2, form.formData().size());
+
+        // detaching the control from the document removes it; re-attaching restores it
+        ext.remove();
+        assertEquals(1, form.formData().size());
+        doc.body().appendChild(ext);
+        assertEquals(2, form.formData().size());
+    }
+
+    @Test void movingControlsReordersResultsByDocumentPosition() {
+        String html = "<input id='ext' name='x' value='2' form='f'>" +
+            "<form id='f'><input id='in1' name='a' value='1'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals("x=2", data.get(0).toString());
+        assertEquals("a=1", data.get(1).toString());
+
+        // move the external control to after the form
+        form.after(doc.selectFirst("#ext"));
+        data = form.formData();
+        assertEquals("a=1", data.get(0).toString());
+        assertEquals("x=2", data.get(1).toString());
+    }
+
+    @Test void selectSelectedChangesOnExternalControlAreLive() {
+        String html = "<form id='f'></form>" +
+            "<select id='s' name='s' form='f'><option value='a'><option value='b' selected></select>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        assertEquals("s=b", form.formData().get(0).toString());
+
+        doc.selectFirst("option[value=a]").attr("selected", "");
+        doc.selectFirst("option[value=b]").removeAttr("selected");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=a", data.get(0).toString());
+    }
+
+    @Test void crossDocumentControlsAreNeverMixed() {
+        Document doc1 = Jsoup.parse("<form id='f'><input name='a' value='1'></form><input name='x' value='2' form='f'>");
+        Document doc2 = Jsoup.parse("<form id='f'><input name='b' value='3'></form><input name='y' value='4' form='f'>");
+
+        List<Connection.KeyVal> data1 = doc1.select("form").forms().get(0).formData();
+        assertEquals(2, data1.size());
+        assertEquals("a=1", data1.get(0).toString());
+        assertEquals("x=2", data1.get(1).toString());
+
+        List<Connection.KeyVal> data2 = doc2.select("form").forms().get(0).formData();
+        assertEquals(2, data2.size());
+        assertEquals("b=3", data2.get(0).toString());
+        assertEquals("y=4", data2.get(1).toString());
+    }
+
+    @Test void formDataDoesNotMutateDom() {
+        String html = "<input name='x' value='1' form='f'><form id='f'><input name='a' value='2'></form>";
+        Document doc = Jsoup.parse(html);
+        String expected = doc.html();
+
+        List<Connection.KeyVal> data1 = doc.select("form").forms().get(0).formData();
+        data1.clear(); // mutating the returned list must not affect anything
+        List<Connection.KeyVal> data2 = doc.select("form").forms().get(0).formData();
+
+        assertEquals(2, data2.size());
+        assertEquals(expected, doc.html()); // no nodes, attributes, or structure changed
+    }
+
+    @Test void externalAssociationsSurviveSerializationRoundTrip() {
+        String html = "<input name='x' value='1' form='f'>" +
+            "<form id='f'><input name='a' value='2'></form>" +
+            "<select name='s' multiple form='f'><option value='q' selected></select>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> before = form.formData();
+
+        Document reparse = Jsoup.parse(doc.html());
+        List<Connection.KeyVal> after = reparse.select("form").forms().get(0).formData();
+
+        assertEquals(before.size(), after.size());
+        for (int i = 0; i < before.size(); i++) {
+            assertEquals(before.get(i).key(), after.get(i).key());
+            assertEquals(before.get(i).value(), after.get(i).value());
+        }
+    }
 }
