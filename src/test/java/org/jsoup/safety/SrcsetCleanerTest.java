@@ -118,6 +118,78 @@ public class SrcsetCleanerTest {
         assertEquals("<img>", Jsoup.clean("<img srcset=\",,\">", safelist()));
     }
 
+    @Test void quotedUrlTreatsCommaAndWhitespaceAsLiteral() {
+        // double-quoted address: the embedded comma and space belong to the address, quotes are not part of it
+        String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, http://example.com/c.jpg 2x'>";
+        String clean = Jsoup.clean(html, safelist());
+        assertEquals("<img srcset=\"&quot;http://example.com/a,b.jpg&quot; 1x, http://example.com/c.jpg 2x\">", clean);
+
+        // single quotes delimit the address the same way
+        String single = "<img srcset=\"'http://example.com/a b.jpg' 1x, http://example.com/c.jpg 2x\">";
+        String cleanSingle = Jsoup.clean(single, safelist());
+        assertEquals("<img srcset=\"'http://example.com/a b.jpg' 1x, http://example.com/c.jpg 2x\">", cleanSingle);
+
+        // quoted address with no descriptor still protects the inner comma
+        String noDesc = "<img srcset='\"http://example.com/a,b.jpg\", http://example.com/c.jpg 2x'>";
+        assertEquals("<img srcset=\"&quot;http://example.com/a,b.jpg&quot;, http://example.com/c.jpg 2x\">",
+            Jsoup.clean(noDesc, safelist()));
+    }
+
+    @Test void quotedUrlIsRecheckedAfterReparse() {
+        // serialized quotes must parse back to the same single address and remain protocol-checked
+        String html = "<img srcset='\"javascript:alert(1)\", http://example.com/c.jpg 2x'>";
+        String clean = Jsoup.clean(html, safelist());
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", clean);
+        assertEquals(clean, Jsoup.clean(clean, safelist()));
+    }
+
+    @Test void malformedQuotedUrlIsDroppedAlone() {
+        // a descriptor glued directly to the closing quote invalidates only that candidate
+        String glued = "<img srcset='\"http://example.com/a.jpg\"1x, http://example.com/c.jpg 2x'>";
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", Jsoup.clean(glued, safelist()));
+
+        // an unterminated quote does not swallow a later valid candidate
+        String unterminated = "<img srcset='\"http://example.com/a.jpg 1x, http://example.com/c.jpg 2x'>";
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", Jsoup.clean(unterminated, safelist()));
+
+        // an empty quoted address is no candidate at all
+        String empty = "<img srcset='\"\" 1x, http://example.com/c.jpg 2x'>";
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", Jsoup.clean(empty, safelist()));
+    }
+
+    @Test void zeroAndNonFiniteDensitiesAreDropped() {
+        String html = "<img srcset=\"http://example.com/a.jpg 0x, http://example.com/b.jpg +0x, "
+            + "http://example.com/c.jpg 0.0x, http://example.com/d.jpg 1e999x, http://example.com/e.jpg 2x\">";
+        String clean = Jsoup.clean(html, safelist());
+        assertEquals("<img srcset=\"http://example.com/e.jpg 2x\">", clean);
+    }
+
+    @Test void controlCharCandidatesAreRejectedNotStripped() {
+        // an entity-decoded control character in the address must drop the candidate rather than smuggle a scheme
+        String html = "<img srcset=\"java&#x09;script:alert(1), http://example.com/ok.jpg 1x\">";
+        String clean = Jsoup.clean(html, "https://", safelist());
+        assertEquals("<img srcset=\"http://example.com/ok.jpg 1x\">", clean);
+
+        // a raw control char inside an otherwise-good URL invalidates that candidate only
+        String raw = "<img srcset=\"http://example.com/a&#x0a;.jpg 1x, http://example.com/ok.jpg 2x\">";
+        assertEquals("<img srcset=\"http://example.com/ok.jpg 2x\">", Jsoup.clean(raw, "https://", safelist()));
+    }
+
+    @Test void quotedCandidateOutputIsIdempotent() {
+        String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, \"http://example.com/c d.jpg\" 2x'>";
+        Cleaner cleaner = new Cleaner(safelist());
+        Document once = cleaner.clean(Jsoup.parseBodyFragment(html, "http://example.com/"));
+        Document twice = cleaner.clean(once);
+        assertEquals(once.body().html(), twice.body().html());
+        // both addresses survive, each still carrying its single descriptor (no ghost candidates from inner punctuation)
+        String srcset = once.expectFirst("img").attr("srcset");
+        assertTrue(srcset.contains("a,b.jpg"));
+        assertTrue(srcset.contains("c d.jpg"));
+        assertTrue(srcset.contains(" 1x"));
+        assertTrue(srcset.contains(" 2x"));
+        assertEquals(2, srcset.split("\\s[12]x", -1).length - 1);
+    }
+
     @Test void commaInsideDataUrlIsNotASeparator() {
         Safelist safelist = safelist().addProtocols("img", "srcset", "http", "https", "data");
         // data: URLs with no descriptor: the comma that is part of the data must survive the boundary comma

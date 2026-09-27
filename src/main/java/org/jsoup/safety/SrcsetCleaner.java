@@ -16,9 +16,10 @@ import java.util.Set;
  The attribute value is split into candidates following the HTML {@code srcset} parsing rules: a candidate consists of a
  URL followed by an optional width ({@code w}) or pixel density ({@code x}) descriptor. Commas only separate
  candidates at a candidate boundary, so commas nested inside a {@code data:} URL, a quoted value, or entity-decoded
- content are preserved. Each surviving URL is checked against the safelist with the same protocol and encoding rules
- used for ordinary URI attributes such as {@code src}; invalid descriptors cause their single candidate to be dropped,
- without affecting the other candidates.
+ content are preserved. A candidate address may be wrapped in matching {@code "} or {@code '} quotes; the commas and
+ whitespace inside are literal and the quotes never become part of the address. Each surviving URL is checked
+ against the safelist with the same protocol and encoding rules used for ordinary URI attributes such as {@code src};
+ invalid descriptors cause their single candidate to be dropped, without affecting the other candidates.
  </p>
  */
 final class SrcsetCleaner {
@@ -60,35 +61,22 @@ final class SrcsetCleaner {
                 while (pos < len && isWsOrComma(rawValue.charAt(pos))) pos++;
                 if (pos >= len) break;
 
-                // 2. Collect the URL: a run of non-whitespace characters.
-                int urlStart = pos;
-                while (pos < len && !StringUtil.isWhitespace(rawValue.charAt(pos))) pos++;
-                int urlRunEnd = pos;
-                int urlEnd = urlRunEnd;
-                while (urlEnd > urlStart && rawValue.charAt(urlEnd - 1) == ',') urlEnd--;
-                String url = rawValue.substring(urlStart, urlEnd);
-
-                List<String> descriptors;
-                if (urlEnd < urlRunEnd) {
-                    // The URL run ended in comma(s) with no whitespace: the boundary has no descriptor and parsing
-                    // restarts at the splitting loop. This is what keeps a comma inside a data: URL (e.g.
-                    // "data:,Hello") part of the URL.
-                    descriptors = Collections.emptyList();
-                    pos = urlRunEnd;
-                } else {
-                    // 3. Tokenize the descriptors with the HTML srcset state machine, so that a comma nested in a
-                    //    parenthesized (or quoted) descriptor does not get mistaken for a candidate boundary.
-                    TokenizerResult tokenized = tokenizeDescriptors(rawValue, pos);
-                    descriptors = tokenized.tokens;
-                    pos = tokenized.nextPos;
+                // 2. Collect the URL and whatever descriptor tokens follow it. A URL run may be wrapped in matching
+                //    quotes, in which case its commas and whitespace are literal address content.
+                UrlRun run = collectUrl(rawValue, pos);
+                pos = run.nextPos;
+                if (!run.valid) { // malformed quoted run: drop this item, keep parsing any later candidates
+                    dropped++;
+                    continue;
                 }
+                String url = run.url;
 
                 if (url.isEmpty()) continue;
 
-                String descriptor = parseDescriptors(descriptors);
+                String descriptor = parseDescriptors(run.descriptors);
                 String safeUrl = (descriptor != null) ? isSafeUrl(el, url, safelist) : null;
                 if (safeUrl != null)
-                    accepted.add(new Candidate(safeUrl, descriptor));
+                    accepted.add(new Candidate(safeUrl, descriptor, run.quoted, run.quoteChar));
                 else
                     dropped++;
             }
@@ -119,6 +107,91 @@ final class SrcsetCleaner {
             this.tokens = tokens;
             this.nextPos = nextPos;
         }
+    }
+
+    /** One collected candidate: the decoded URL, its descriptor tokens, and where parsing should continue. */
+    private static final class UrlRun {
+        final String url;
+        final List<String> descriptors;
+        final int nextPos;
+        final boolean valid; // false for a malformed quoted run (junk after the quote, or an unterminated quote)
+        final boolean quoted;
+        final char quoteChar; // the delimiter when {@code quoted}, otherwise undefined
+
+        private UrlRun(String url, List<String> descriptors, int nextPos, boolean valid, boolean quoted, char quoteChar) {
+            this.url = url;
+            this.descriptors = descriptors;
+            this.nextPos = nextPos;
+            this.valid = valid;
+            this.quoted = quoted;
+            this.quoteChar = quoteChar;
+        }
+    }
+
+    /**
+     Collect one candidate starting at {@code start}: its URL run and the descriptor tokens that follow it.
+     <p>
+     A run whose first character is a matching {@code "} or {@code '} is quoted: the address runs to the closing
+     delimiter, so embedded commas, whitespace, and decoded character references are literal address content rather
+     than candidate boundaries. The delimiter itself never becomes part of the address. The closing quote may be
+     followed by whitespace introducing descriptors, a boundary comma, or end of input; any other character glued
+     directly to the quote invalidates the candidate. An unterminated quote drops that item, and parsing resyncs at
+     the next candidate comma so any following valid candidate is still considered.
+     </p>
+     */
+    private static UrlRun collectUrl(String input, int start) {
+        int len = input.length();
+        char first = input.charAt(start);
+
+        if (first == '"' || first == '\'') {
+            char quote = first;
+            int contentStart = start + 1;
+            int p = contentStart;
+            while (p < len && input.charAt(p) != quote) p++;
+            if (p >= len) {
+                // Unterminated quote: the malformed item is dropped, but a later comma still resyncs parsing so a
+                // following valid candidate is not swallowed. Without a comma there is nothing more to recover.
+                int comma = input.indexOf(',', contentStart);
+                int nextPos = comma >= 0 ? comma + 1 : len;
+                return new UrlRun(input.substring(contentStart), Collections.emptyList(), nextPos, false, true, quote);
+            }
+            String url = input.substring(contentStart, p);
+            p++; // the closing quote
+
+            int q = p;
+            boolean separated = false;
+            while (q < len && StringUtil.isWhitespace(input.charAt(q))) { q++; separated = true; }
+
+            if (q < len && input.charAt(q) == ',') {
+                return new UrlRun(url, Collections.emptyList(), q + 1, true, true, quote);
+            }
+            if (q == len) {
+                return new UrlRun(url, Collections.emptyList(), q, true, true, quote);
+            }
+            // Descriptor tokens begin here; they are legal only after whitespace separating them from the quote.
+            // Tokenize regardless so that the boundary comma (if any) is consumed and later candidates survive.
+            TokenizerResult tokenized = tokenizeDescriptors(input, q);
+            return new UrlRun(url, tokenized.tokens, tokenized.nextPos, separated, true, quote);
+        }
+
+        // Unquoted URL: a run of non-whitespace characters.
+        int urlStart = start;
+        int pos = start;
+        while (pos < len && !StringUtil.isWhitespace(input.charAt(pos))) pos++;
+        int urlRunEnd = pos;
+        int urlEnd = urlRunEnd;
+        while (urlEnd > urlStart && input.charAt(urlEnd - 1) == ',') urlEnd--;
+        String url = input.substring(urlStart, urlEnd);
+
+        if (urlEnd < urlRunEnd) {
+            // The URL run ended in comma(s) with no whitespace: the boundary has no descriptor and parsing restarts
+            // at the splitting loop. This is what keeps a comma inside a data: URL (e.g. "data:,Hello") in the URL.
+            return new UrlRun(url, Collections.emptyList(), urlRunEnd, true, false, (char) 0);
+        }
+        // Tokenize the descriptors with the HTML srcset state machine, so that a comma nested in a parenthesized
+        // (or quoted) descriptor does not get mistaken for a candidate boundary.
+        TokenizerResult tokenized = tokenizeDescriptors(input, pos);
+        return new UrlRun(url, tokenized.tokens, tokenized.nextPos, true, false, (char) 0);
     }
 
     private static boolean isWsOrComma(char c) {
@@ -176,7 +249,7 @@ final class SrcsetCleaner {
 
     /**
      Validate the tokenized descriptor list of one candidate. Legal forms are: no descriptor, a single non-zero
-     width ({@code <integer>w}), or a single finite non-negative pixel density ({@code <number>x}). Duplicated,
+     width ({@code <integer>w}), or a single finite strictly-positive pixel density ({@code <number>x}). Duplicated,
      unknown, parenthesized, or syntactically invalid descriptors invalidate the candidate.
      @return the normalized descriptor suffix ({@code ""} when absent, or {@code " <descriptor>"}), or {@code null}
      */
@@ -212,7 +285,7 @@ final class SrcsetCleaner {
         return value == 0L ? null : value;
     }
 
-    /** Parse a finite non-negative floating-point number matching the HTML valid floating-point number grammar. */
+    /** Parse a finite strictly-positive floating-point number matching the HTML valid floating-point number grammar. */
     private static Double parseDensity(String s) {
         int i = 0;
         if (i < s.length() && (s.charAt(i) == '+' || s.charAt(i) == '-')) {
@@ -238,8 +311,8 @@ final class SrcsetCleaner {
         if (i != s.length()) return null; // trailing junk
         try {
             double value = Double.parseDouble(s);
-            // the HTML spec only rejects negative densities here; zero is a grammatical, if odd, density
-            if (value < 0d || Double.isNaN(value) || Double.isInfinite(value)) return null;
+            // the descriptor must be a strictly positive finite number: zero, negatives, NaN, and infinity are invalid
+            if (!(value > 0d) || Double.isNaN(value) || Double.isInfinite(value)) return null;
             return value;
         } catch (NumberFormatException e) {
             return null;
@@ -253,21 +326,23 @@ final class SrcsetCleaner {
     /**
      Check one candidate URL against the safelist's protocol policy and return the URL spelling to emit.
      <p>
-     This mirrors the ordinary URI attribute path in {@link Safelist}: the URL is resolved against the element's base
-     URI (which strips and percent-normalizes control characters the same way {@code src} does), and the resolved or
-     as-written value must begin with an allowed scheme. When relative links are not preserved, resolvable candidates
-     are emitted in absolute form, exactly like an ordinary {@code src} value.
+     Character references have already been decoded by the parser, so a URL that still contains an ASCII control
+     character or newline is rejected outright: such characters cannot occur in a conforming address and are used to
+     smuggle disguised {@code javascript:} or {@code data:} schemes past a prefix test. Other URLs are resolved and
+     checked exactly like an ordinary URI attribute such as {@code src}. When relative links are not preserved,
+     resolvable candidates are emitted in absolute form.
      </p>
      @return the URL to keep (absolute or original spelling), or {@code null} if it must be dropped
      */
     private static String isSafeUrl(Element el, String url, Safelist safelist) {
+        if (containsControlChar(url)) return null; // controls, tabs, and newlines can never be part of a safe address
+
         Set<Safelist.Protocol> protocols = safelist.srcsetProtocols(el.normalName());
-        if (protocols.isEmpty()) return stripControlChars(url); // no protocol policy: accept, like an ordinary untyped attribute
+        if (protocols.isEmpty()) return url; // no protocol policy: accept, like an ordinary untyped attribute
 
         String resolved = StringUtil.resolve(el.baseUri(), url);
         String check = resolved;
         if (check.isEmpty() && !StringUtil.hasHttpScheme(url)) check = url; // custom schemes checked as written
-        check = stripControlChars(check);
         if (check.isEmpty()) return null; // an unresolvable relative URL with no base is not acceptable
 
         String lc = Normalizer.lowerCase(check);
@@ -277,29 +352,19 @@ final class SrcsetCleaner {
             if (lc.startsWith(prot)
                 && lc.length() > prot.length()
                 && lc.charAt(prot.length()) == ':') {
-                // Emit the absolute form like an ordinary src value, unless relative links are preserved; in either
-                // case strip ASCII control characters, which browsers remove from URLs and would destabilize reparse.
-                String emit = (!safelist.preserveRelativeLinks() && !resolved.isEmpty()) ? resolved : url;
-                return stripControlChars(emit);
+                // Emit the absolute form like an ordinary src value, unless relative links are preserved.
+                return (!safelist.preserveRelativeLinks() && !resolved.isEmpty()) ? resolved : url;
             }
         }
         return null;
     }
 
-    private static String stripControlChars(String url) {
-        StringBuilder sb = null;
+    private static boolean containsControlChar(String url) {
         for (int i = 0; i < url.length(); i++) {
             char c = url.charAt(i);
-            if (c <= 0x1f) {
-                if (sb == null) {
-                    sb = new StringBuilder(url.length());
-                    sb.append(url, 0, i);
-                }
-            } else if (sb != null) {
-                sb.append(c);
-            }
+            if (c <= 0x1f || c == 0x7f) return true;
         }
-        return sb == null ? url : sb.toString();
+        return false;
     }
 
     private static String serialize(List<Candidate> candidates) {
@@ -307,7 +372,13 @@ final class SrcsetCleaner {
         for (int i = 0; i < candidates.size(); i++) {
             if (i > 0) sb.append(", ");
             Candidate candidate = candidates.get(i);
-            sb.append(candidate.url).append(candidate.descriptor);
+            // A quoted address is re-wrapped in its original delimiter so the serialized value parses back into the
+            // same single candidate (its inner commas/whitespace stay literal). Unquoted runs never contain
+            // whitespace, so they need no wrapping.
+            if (candidate.quoted) sb.append(candidate.quoteChar);
+            sb.append(candidate.url);
+            if (candidate.quoted) sb.append(candidate.quoteChar);
+            sb.append(candidate.descriptor);
         }
         return StringUtil.releaseBuilder(sb);
     }
@@ -315,10 +386,14 @@ final class SrcsetCleaner {
     private static final class Candidate {
         final String url;
         final String descriptor; // normalized as "" or " <descriptor>"
+        final boolean quoted;
+        final char quoteChar;
 
-        Candidate(String url, String descriptor) {
+        Candidate(String url, String descriptor, boolean quoted, char quoteChar) {
             this.url = url;
             this.descriptor = descriptor;
+            this.quoted = quoted;
+            this.quoteChar = quoteChar;
         }
     }
 }
