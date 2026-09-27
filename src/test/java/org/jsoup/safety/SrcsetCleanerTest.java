@@ -292,6 +292,52 @@ public class SrcsetCleanerTest {
         assertTrue(srcset.contains("480w"));
     }
 
+    @Test void doubleQuotedAddressKeepsInnerCommaAndDropsQuotes() {
+        String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, http://example.com/c.jpg 2x'>";
+        String clean = Jsoup.clean(html, safelist());
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 2x\">", clean);
+    }
+
+    @Test void singleQuotedAddressKeepsInnerCommaAndDropsQuotes() {
+        String html = "<img srcset=\"'http://example.com/a,b.jpg' 1x, http://example.com/c.jpg 2x\">";
+        String clean = Jsoup.clean(html, safelist());
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 2x\">", clean);
+    }
+
+    @Test void quotedAddressWithWhitespaceIsRequotedAndReparseable() {
+        Cleaner cleaner = new Cleaner(safelist());
+        Document once = cleaner.clean(Jsoup.parseBodyFragment(
+            "<img srcset='\"http://example.com/a b.jpg\" 1x, http://example.com/c.jpg 2x'>", "http://example.com/"));
+        assertEquals("\"http://example.com/a b.jpg\" 1x, http://example.com/c.jpg 2x",
+            once.expectFirst("img").attr("srcset"));
+
+        // serializing and cleaning again yields the same candidates
+        Document twice = cleaner.clean(Jsoup.parseBodyFragment(once.body().html(), "http://example.com/"));
+        assertEquals(once.body().html(), twice.body().html());
+    }
+
+    @Test void quotedUnsafeAddressIsDroppedAlone() {
+        String html = "<img srcset='\"javascript:alert(1)\" 1x, http://example.com/a.jpg 2x'>";
+        assertEquals("<img srcset=\"http://example.com/a.jpg 2x\">", Jsoup.clean(html, safelist()));
+    }
+
+    @Test void entitiesInsideQuotedAddressAreNotBoundaries() {
+        String html = "<img srcset='\"http://example.com/a&comma;b.jpg\" 1x'>";
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x\">", Jsoup.clean(html, safelist()));
+    }
+
+    @Test void unterminatedQuotedAddressConsumesRestWithoutThrowing() {
+        Cleaner cleaner = new Cleaner(safelist());
+        Document doc = Jsoup.parseBodyFragment("<img srcset='\"http://example.com/a.jpg'>", "http://example.com/");
+        Document clean = assertDoesNotThrow(() -> cleaner.clean(doc));
+        assertEquals("http://example.com/a.jpg", clean.expectFirst("img").attr("srcset"));
+    }
+
+    @Test void zeroDensityIsDropped() {
+        String html = "<img srcset=\"http://example.com/a.jpg 0x, http://example.com/b.jpg 0.0x, http://example.com/c.jpg 2x\">";
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", Jsoup.clean(html, safelist()));
+    }
+
     @Test void neverThrowsOnHostileInput() {
         String[] hostile = {
             "", " ", ",", ",,,", " , , ",

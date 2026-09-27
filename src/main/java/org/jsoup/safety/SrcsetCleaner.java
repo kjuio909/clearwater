@@ -60,34 +60,55 @@ final class SrcsetCleaner {
                 while (pos < len && isWsOrComma(rawValue.charAt(pos))) pos++;
                 if (pos >= len) break;
 
-                // 2. Collect the URL: a run of non-whitespace characters.
-                int urlStart = pos;
-                while (pos < len && !StringUtil.isWhitespace(rawValue.charAt(pos))) pos++;
-                int urlRunEnd = pos;
-                int urlEnd = urlRunEnd;
-                while (urlEnd > urlStart && rawValue.charAt(urlEnd - 1) == ',') urlEnd--;
-                String url = rawValue.substring(urlStart, urlEnd);
-
+                // 2. Collect the URL. An address may be quoted ('...' or "..."): the quotes only delimit the
+                //    address and are not part of it, so commas, whitespace, and decoded entities inside them
+                //    cannot be mistaken for candidate boundaries. An unquoted URL is a run of non-whitespace
+                //    characters.
+                String url;
                 List<String> descriptors;
-                if (urlEnd < urlRunEnd) {
-                    // The URL run ended in comma(s) with no whitespace: the boundary has no descriptor and parsing
-                    // restarts at the splitting loop. This is what keeps a comma inside a data: URL (e.g.
-                    // "data:,Hello") part of the URL.
-                    descriptors = Collections.emptyList();
-                    pos = urlRunEnd;
+                char first = rawValue.charAt(pos);
+                if (first == '"' || first == '\'') {
+                    int close = rawValue.indexOf(first, pos + 1);
+                    if (close == -1) { // unterminated quote: the rest of the value is the address, no descriptors
+                        url = rawValue.substring(pos + 1);
+                        pos = len;
+                        descriptors = Collections.emptyList();
+                    } else {
+                        url = rawValue.substring(pos + 1, close);
+                        pos = close + 1;
+                        // 3. Tokenize the descriptors (see below)
+                        TokenizerResult tokenized = tokenizeDescriptors(rawValue, pos);
+                        descriptors = tokenized.tokens;
+                        pos = tokenized.nextPos;
+                    }
                 } else {
-                    // 3. Tokenize the descriptors with the HTML srcset state machine, so that a comma nested in a
-                    //    parenthesized (or quoted) descriptor does not get mistaken for a candidate boundary.
-                    TokenizerResult tokenized = tokenizeDescriptors(rawValue, pos);
-                    descriptors = tokenized.tokens;
-                    pos = tokenized.nextPos;
+                    int urlStart = pos;
+                    while (pos < len && !StringUtil.isWhitespace(rawValue.charAt(pos))) pos++;
+                    int urlRunEnd = pos;
+                    int urlEnd = urlRunEnd;
+                    while (urlEnd > urlStart && rawValue.charAt(urlEnd - 1) == ',') urlEnd--;
+                    url = rawValue.substring(urlStart, urlEnd);
+
+                    if (urlEnd < urlRunEnd) {
+                        // The URL run ended in comma(s) with no whitespace: the boundary has no descriptor and
+                        // parsing restarts at the splitting loop. This is what keeps a comma inside a data: URL
+                        // (e.g. "data:,Hello") part of the URL.
+                        descriptors = Collections.emptyList();
+                        pos = urlRunEnd;
+                    } else {
+                        // 3. Tokenize the descriptors with the HTML srcset state machine, so that a comma nested
+                        //    in a parenthesized descriptor does not get mistaken for a candidate boundary.
+                        TokenizerResult tokenized = tokenizeDescriptors(rawValue, pos);
+                        descriptors = tokenized.tokens;
+                        pos = tokenized.nextPos;
+                    }
                 }
 
                 if (url.isEmpty()) continue;
 
                 String descriptor = parseDescriptors(descriptors);
                 String safeUrl = (descriptor != null) ? isSafeUrl(el, url, safelist) : null;
-                if (safeUrl != null)
+                if (safeUrl != null && isSerializable(safeUrl))
                     accepted.add(new Candidate(safeUrl, descriptor));
                 else
                     dropped++;
@@ -176,7 +197,7 @@ final class SrcsetCleaner {
 
     /**
      Validate the tokenized descriptor list of one candidate. Legal forms are: no descriptor, a single non-zero
-     width ({@code <integer>w}), or a single finite non-negative pixel density ({@code <number>x}). Duplicated,
+     width ({@code <integer>w}), or a single finite positive pixel density ({@code <number>x}). Duplicated,
      unknown, parenthesized, or syntactically invalid descriptors invalidate the candidate.
      @return the normalized descriptor suffix ({@code ""} when absent, or {@code " <descriptor>"}), or {@code null}
      */
@@ -212,7 +233,7 @@ final class SrcsetCleaner {
         return value == 0L ? null : value;
     }
 
-    /** Parse a finite non-negative floating-point number matching the HTML valid floating-point number grammar. */
+    /** Parse a finite positive floating-point number matching the HTML valid floating-point number grammar. */
     private static Double parseDensity(String s) {
         int i = 0;
         if (i < s.length() && (s.charAt(i) == '+' || s.charAt(i) == '-')) {
@@ -238,8 +259,8 @@ final class SrcsetCleaner {
         if (i != s.length()) return null; // trailing junk
         try {
             double value = Double.parseDouble(s);
-            // the HTML spec only rejects negative densities here; zero is a grammatical, if odd, density
-            if (value < 0d || Double.isNaN(value) || Double.isInfinite(value)) return null;
+            // only positive densities are meaningful; zero, negative, and non-finite values invalidate the candidate
+            if (value <= 0d || Double.isNaN(value) || Double.isInfinite(value)) return null;
             return value;
         } catch (NumberFormatException e) {
             return null;
@@ -307,9 +328,38 @@ final class SrcsetCleaner {
         for (int i = 0; i < candidates.size(); i++) {
             if (i > 0) sb.append(", ");
             Candidate candidate = candidates.get(i);
-            sb.append(candidate.url).append(candidate.descriptor);
+            appendUrl(sb, candidate.url);
+            sb.append(candidate.descriptor);
         }
         return StringUtil.releaseBuilder(sb);
+    }
+
+    /**
+     Append one URL, re-quoting it when its bare spelling would not reparse into the same candidate: that is the
+     case when it contains whitespace, ends in a comma (which the parser would strip as a separator), or starts
+     with a quote character. {@link #isSerializable} guarantees a usable quote character is available.
+     */
+    private static void appendUrl(StringBuilder sb, String url) {
+        if (!needsQuotes(url)) {
+            sb.append(url);
+            return;
+        }
+        char quote = url.indexOf('"') == -1 ? '"' : '\'';
+        sb.append(quote).append(url).append(quote);
+    }
+
+    private static boolean needsQuotes(String url) {
+        if (url.isEmpty()) return false;
+        char first = url.charAt(0);
+        if (first == '"' || first == '\'' || url.charAt(url.length() - 1) == ',') return true;
+        for (int i = 0; i < url.length(); i++)
+            if (StringUtil.isWhitespace(url.charAt(i))) return true;
+        return false;
+    }
+
+    /** A URL that needs quotes but contains both quote characters cannot be serialized reparseably. */
+    private static boolean isSerializable(String url) {
+        return !needsQuotes(url) || url.indexOf('"') == -1 || url.indexOf('\'') == -1;
     }
 
     private static final class Candidate {
