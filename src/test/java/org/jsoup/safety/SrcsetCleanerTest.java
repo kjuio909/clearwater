@@ -91,6 +91,45 @@ public class SrcsetCleanerTest {
         assertEquals("<img srcset=\"http://example.com/g.jpg, http://example.com/i.jpg 2x\">", clean);
     }
 
+    @Test void strictWidthDescriptors() {
+        // only a single strictly positive decimal integer followed by a lower-case w is a width descriptor
+        String good = "<img srcset=\"http://example.com/a.jpg 1w, http://example.com/b.jpg 300w, "
+            + "http://example.com/c.jpg 007w, http://example.com/d.jpg 9223372036854775807w\">";
+        assertEquals("<img srcset=\"http://example.com/a.jpg 1w, http://example.com/b.jpg 300w, "
+            + "http://example.com/c.jpg 007w, http://example.com/d.jpg 9223372036854775807w\">",
+            Jsoup.clean(good, safelist()));
+
+        String bad = "<img srcset=\"http://example.com/z.jpg 0w, http://example.com/a.jpg +3w, "
+            + "http://example.com/b.jpg -3w, http://example.com/c.jpg 1.5w, http://example.com/d.jpg .5w, "
+            + "http://example.com/e.jpg 1e2w, http://example.com/f.jpg 100W, http://example.com/g.jpg w, "
+            + "http://example.com/h.jpg 1ww, http://example.com/i.jpg 00w, "
+            + "http://example.com/j.jpg 99999999999999999999999999w, http://example.com/ok.jpg 2x\">";
+        assertEquals("<img srcset=\"http://example.com/ok.jpg 2x\">", Jsoup.clean(bad, safelist()));
+    }
+
+    @Test void duplicateOrMixedWidthDescriptorsAreDropped() {
+        String bad = "<img srcset=\"http://example.com/a.jpg 100w 200w, "
+            + "http://example.com/b.jpg 100w 100w, "
+            + "http://example.com/c.jpg 100w 2x, "
+            + "http://example.com/d.jpg 2x 100w, "
+            + "http://example.com/ok.jpg 320w\">";
+        assertEquals("<img srcset=\"http://example.com/ok.jpg 320w\">", Jsoup.clean(bad, safelist()));
+    }
+
+    @Test void allBadWidthDescriptorsRemoveAttribute() {
+        String bad = "<img srcset=\"http://example.com/a.jpg 0w, http://example.com/b.jpg -1w\">";
+        assertEquals("<img>", Jsoup.clean(bad, "http://example.com/", safelist()));
+    }
+
+    @Test void cleanedSrcsetReparsesToSameCandidates() {
+        String html = "<img srcset=' , \"http://example.com/a,b.jpg\" 1x, , http://example.com/b.jpg  300w ,'>";
+        String clean = Jsoup.clean(html, "http://example.com/", safelist());
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x, http://example.com/b.jpg 300w\">", clean);
+        // parsing the cleaned value yields the same two candidates, descriptors, and order
+        Element img = Jsoup.parse(clean).expectFirst("img");
+        assertEquals("http://example.com/a,b.jpg 1x, http://example.com/b.jpg 300w", img.attr("srcset"));
+    }
+
     @Test void illegalDensityValuesAreDropped() {
         String html = "<img srcset=\"http://example.com/a.jpg -1x, http://example.com/b.jpg x, "
             + "http://example.com/c.jpg .x, http://example.com/d.jpg 1ex, http://example.com/e.jpg 2x\">";
@@ -119,20 +158,28 @@ public class SrcsetCleanerTest {
     }
 
     @Test void quotedUrlTreatsCommaAndWhitespaceAsLiteral() {
-        // double-quoted address: the embedded comma and space belong to the address, quotes are not part of it
+        // double-quoted address: the embedded comma belongs to the address while parsing, and the delimiting
+        // quotes are syntax only and never appear in the cleaned output
         String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, http://example.com/c.jpg 2x'>";
         String clean = Jsoup.clean(html, safelist());
-        assertEquals("<img srcset=\"&quot;http://example.com/a,b.jpg&quot; 1x, http://example.com/c.jpg 2x\">", clean);
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 2x\">", clean);
+        assertFalse(clean.contains("&quot;"), "delimiting quote leaked into output: " + clean);
 
-        // single quotes delimit the address the same way
+        // single quotes delimit the address the same way; the inner space is literal while parsing, but a bare
+        // address containing that space could not reparse as one candidate, so it is dropped alone
         String single = "<img srcset=\"'http://example.com/a b.jpg' 1x, http://example.com/c.jpg 2x\">";
         String cleanSingle = Jsoup.clean(single, safelist());
-        assertEquals("<img srcset=\"'http://example.com/a b.jpg' 1x, http://example.com/c.jpg 2x\">", cleanSingle);
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", cleanSingle);
 
-        // quoted address with no descriptor still protects the inner comma
+        // quoted address with no descriptor still protects the inner comma, and still emits no quotes
         String noDesc = "<img srcset='\"http://example.com/a,b.jpg\", http://example.com/c.jpg 2x'>";
-        assertEquals("<img srcset=\"&quot;http://example.com/a,b.jpg&quot;, http://example.com/c.jpg 2x\">",
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg, http://example.com/c.jpg 2x\">",
             Jsoup.clean(noDesc, safelist()));
+
+        // inner commas/parentheses are literal for quoted relative addresses too
+        String relative = "<img srcset='\"/a,b.jpg\" 1x, /c.jpg 2x'>";
+        assertEquals("<img srcset=\"http://example.com/a,b.jpg 1x, http://example.com/c.jpg 2x\">",
+            Jsoup.clean(relative, "http://example.com/path/", safelist()));
     }
 
     @Test void quotedUrlIsRecheckedAfterReparse() {
@@ -176,18 +223,30 @@ public class SrcsetCleanerTest {
     }
 
     @Test void quotedCandidateOutputIsIdempotent() {
-        String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, \"http://example.com/c d.jpg\" 2x'>";
+        String html = "<img srcset='\"http://example.com/a,b.jpg\" 1x, \"http://example.com/c,d.jpg\" 2x'>";
         Cleaner cleaner = new Cleaner(safelist());
         Document once = cleaner.clean(Jsoup.parseBodyFragment(html, "http://example.com/"));
         Document twice = cleaner.clean(once);
         assertEquals(once.body().html(), twice.body().html());
-        // both addresses survive, each still carrying its single descriptor (no ghost candidates from inner punctuation)
+        // both addresses survive, bare (no delimiting quotes), each still carrying its single descriptor
         String srcset = once.expectFirst("img").attr("srcset");
-        assertTrue(srcset.contains("a,b.jpg"));
-        assertTrue(srcset.contains("c d.jpg"));
-        assertTrue(srcset.contains(" 1x"));
-        assertTrue(srcset.contains(" 2x"));
+        assertEquals("http://example.com/a,b.jpg 1x, http://example.com/c,d.jpg 2x", srcset);
+        assertFalse(srcset.contains("\"") && srcset.contains("'"), "delimiting quote leaked into output: " + srcset);
         assertEquals(2, srcset.split("\\s[12]x", -1).length - 1);
+    }
+
+    @Test void quotedAddressWithWhitespaceIsDroppedAlone() {
+        // a quoted address whose decoded value contains HTML whitespace cannot be written bare and still reparse as
+        // one candidate, so it is dropped rather than re-quoted; the other candidates are untouched
+        String html = "<img srcset='\"http://example.com/a b.jpg\" 1x, http://example.com/c.jpg 2x'>";
+        String clean = Jsoup.clean(html, "http://example.com/", safelist());
+        assertEquals("<img srcset=\"http://example.com/c.jpg 2x\">", clean);
+
+        // the same applies when relative links are preserved (no absolute rewrite can remove the space)
+        Safelist preserving = safelist().preserveRelativeLinks(true);
+        String rel = Jsoup.clean("<img srcset='\"/a b.jpg\" 1x, /c.jpg 2x'>", "http://example.com/", preserving);
+        assertEquals("<img srcset=\"/c.jpg 2x\">", rel);
+        assertEquals(rel, Jsoup.clean(rel, "http://example.com/", preserving));
     }
 
     @Test void commaInsideDataUrlIsNotASeparator() {
