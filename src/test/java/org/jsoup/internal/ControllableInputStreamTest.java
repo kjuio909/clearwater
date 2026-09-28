@@ -340,6 +340,107 @@ class ControllableInputStreamTest {
         in.close();
     }
 
+    // ===== Progress handler fault isolation =====
+
+    /** throws a RuntimeException on its nth (1-based) event, but counts every event it actually receives */
+    private static final class ExplodingProgress implements Progress<ControllableInputStream> {
+        final AtomicInteger calls = new AtomicInteger();
+        final int failOnCall;
+        final AtomicBoolean sawCompletion = new AtomicBoolean(false);
+
+        ExplodingProgress(int failOnCall) {
+            this.failOnCall = failOnCall;
+        }
+
+        @Override public void onProgress(int processed, int total, float percent, ControllableInputStream context) {
+            int call = calls.incrementAndGet();
+            if (percent == 100f) sawCompletion.set(true);
+            if (call == failOnCall) throw new IllegalStateException("boom from progress handler");
+        }
+    }
+
+    private static int drainCount(InputStream in) throws IOException {
+        byte[] buf = new byte[4096];
+        int total = 0;
+        int read;
+        while ((read = in.read(buf)) != -1) total += read;
+        return total;
+    }
+
+    @Test
+    void failingHandlerNeverAbortsReadOrLeaksAndGetsNoFurtherEvents() throws IOException {
+        int size = 10_000;
+        byte[] data = new byte[size];
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        ExplodingProgress initialFail = new ExplodingProgress(1); // throws on the initial (0,total,0%) event
+        in.onProgress(size, true, initialFail, in);
+
+        int delivered = drainCount(in); // must not throw
+
+        assertEquals(size, delivered, "the fetch continues and delivers every byte");
+        assertEquals(1, initialFail.calls.get(), "after throwing, the handler receives no further events");
+        assertFalse(initialFail.sawCompletion.get(), "a detached failure must not produce a completion");
+        in.close();
+
+        // a fresh registration on the same stream starts independent: prior failure state does not leak
+        ControllableInputStream again = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        ProgressEvents fresh = new ProgressEvents();
+        again.onProgress(size, true, fresh, again);
+        assertEquals(size, drainCount(again));
+        fresh.assertMonotonic();
+        assertEquals(1, fresh.countOf(100f), "a new observer completes on its own state");
+        assertEquals(size, fresh.last().processed);
+        again.close();
+    }
+
+    @Test
+    void handlerThrowingMidStreamIsDetachedWithoutCompletion() throws IOException {
+        int size = 10_000;
+        byte[] data = new byte[size];
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        ExplodingProgress midFail = new ExplodingProgress(2); // initial event OK, first data event throws
+        in.onProgress(size, true, midFail, in);
+
+        int delivered = drainCount(in); // must not throw and must read the whole entity
+
+        assertEquals(size, delivered);
+        assertEquals(2, midFail.calls.get(), "no events delivered after the failing one");
+        assertFalse(midFail.sawCompletion.get(), "no completion is forged for a failed handler");
+        in.close();
+    }
+
+    @Test
+    void handlerThrowingOnTerminalEventIsSwallowed() throws IOException {
+        int size = 1000;
+        byte[] data = new byte[size];
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        Progress<Object> terminalFail = new Progress<Object>() {
+            int calls = 0;
+            @Override public void onProgress(int processed, int total, float percent, Object context) {
+                calls++;
+                if (percent == 100f) throw new RuntimeException("cannot stop completion");
+            }
+        };
+        in.onProgress(size, true, terminalFail, new Object());
+
+        assertEquals(size, drainCount(in)); // the terminal throw must not escape the final read
+        in.close();
+    }
+
+    @Test
+    void unknownLengthFailingHandlerStillReadsToEndWithoutCompletion() throws IOException {
+        int size = 10_000;
+        byte[] data = new byte[size];
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        ExplodingProgress progress = new ExplodingProgress(1);
+        in.onProgress(-1, true, progress, in); // unknown length
+
+        assertEquals(size, drainCount(in));
+        assertEquals(1, progress.calls.get());
+        assertFalse(progress.sawCompletion.get());
+        in.close();
+    }
+
     private static final class CountingInputStream extends FilterInputStream {
         int count = 0;
 

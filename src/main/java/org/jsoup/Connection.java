@@ -557,6 +557,28 @@ public interface Connection {
     }
 
     /**
+     * Set a progress handler, which is called periodically as the response body is downloaded. Since documents are
+     * parsed as they are downloaded, this is also a good proxy for parse progress. This is equivalent to
+     * {@link #onResponseProgress(Progress)}, and is the primary entry point for observing download progress.
+     <p>The {@link Response} object is supplied as the progress context, and may be read to obtain headers etc.</p>
+     <p>The handler is a purely side-channel observer: it must not affect the fetch. In particular, if the handler
+     throws a {@link RuntimeException} on any progress event, that exception is swallowed and never propagated to
+     the caller; the current request still consumes the response and returns the same document (or raises the same
+     request exception) it would have without a handler. After such a failure the handler receives no further events
+     for that request, but the network read, parsing, and resource close all still run to completion, and no
+     completion event is fabricated. Progress state (counters, percentage, failure flag) is per request: reusing a
+     connection for another request rebuilds it independently, so a handler that threw, an empty response, or a
+     completed response on one request never affects the next.</p>
+     @param handler the progress handler, or {@code null} to remove any previously registered handler
+     @return this Connection, for chaining
+     @since 1.23.3
+     @see #onResponseProgress(Progress)
+     */
+    default Connection onProgress(@Nullable Progress<Response> handler) {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
      * Common methods for Requests and Responses
      * @param <T> Type of Base, either Request or Response
      */

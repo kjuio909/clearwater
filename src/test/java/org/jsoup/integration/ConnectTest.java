@@ -1556,4 +1556,115 @@ public class ConnectTest {
         assertEquals("Hello, World!", doc.expectFirst("p").text());
         ok.assertCompletedOnce(HelloBody.length());
     }
+
+    // ===== onProgress public entry point and handler fault isolation =====
+
+    @Test void onProgressReportsAndCompletesThroughPublicEntryPoint() throws IOException {
+        ProgressTracker tracker = new ProgressTracker();
+
+        Document doc = Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .onProgress(tracker)
+            .get();
+
+        assertEquals(LargeDocTextLen, doc.text().length());
+        tracker.assertCompletedOnce(LargeDocFileLen);
+    }
+
+    @Test void onProgressThrowingHandlerNeverChangesTheFetch() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        Progress<Connection.Response> failing = (processed, total, percent, response) -> {
+            calls.incrementAndGet();
+            throw new IllegalStateException("progress observers must not be able to break the fetch");
+        };
+
+        Document doc = Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .onProgress(failing)
+            .get(); // no exception leaks from the handler
+
+        assertTrue(calls.get() > 0, "the handler was invoked before being detached");
+        assertEquals(LargeDocTextLen, doc.text().length(), "the document is identical to the no-handler result");
+    }
+
+    @Test void onProgressThrowingHandlerStopsReceivingEventsWithinRequest() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger failures = new AtomicInteger();
+        Progress<Connection.Response> failAfterThree = (processed, total, percent, response) -> {
+            int n = calls.incrementAndGet();
+            if (n == 3) {
+                failures.incrementAndGet();
+                throw new IllegalStateException("boom");
+            }
+        };
+
+        Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .onProgress(failAfterThree)
+            .get();
+
+        assertEquals(3, calls.get(), "after a throw, the handler is detached and sees no later events");
+        assertEquals(1, failures.get());
+    }
+
+    @Test void onProgressFailureOnFirstRequestDoesNotPolluteNextRequestOnSameConnection() throws IOException {
+        Connection con = Jsoup.connect(origin().file.url("/htmltests/large.html"));
+
+        Progress<Connection.Response> alwaysFailing = (processed, total, percent, response) -> {
+            throw new IllegalStateException("first request failure");
+        };
+        Document first = con.onProgress(alwaysFailing).get();
+        assertEquals(LargeDocTextLen, first.text().length());
+
+        // reuse the same connection with the same handler instance: its per-request failure latch is rebuilt
+        ProgressTracker tracker = new ProgressTracker();
+        con.url(origin().hello.url());
+        Document second = con.onProgress(tracker).get();
+        assertEquals("Hello, World!", second.expectFirst("p").text());
+        tracker.assertCompletedOnce(HelloBody.length());
+
+        // and once more with the failing instance re-registered: only that request is isolated
+        con.url(origin().hello.url());
+        Document third = con.onProgress(alwaysFailing).get();
+        assertEquals("Hello, World!", third.expectFirst("p").text());
+    }
+
+    @Test void onProgressNullRemovesTheHandler() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        Progress<Connection.Response> tracker = (processed, total, percent, response) -> calls.incrementAndGet();
+
+        Document doc = Jsoup.connect(origin().hello.url())
+            .onProgress(tracker)
+            .onProgress(null) // cancelled before execution
+            .get();
+
+        assertEquals(0, calls.get(), "a cancelled handler must not observe anything");
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+    }
+
+    @Test void onProgressThrowingHandlerOnEmptyEntityDoesNotLeak() throws IOException {
+        // HEAD has no body stream; its single synthetic completion event must also be fault-isolated
+        Connection.Response res = Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .method(Method.HEAD)
+            .onProgress((processed, total, percent, response) -> { throw new RuntimeException("boom on empty"); })
+            .execute();
+
+        assertEquals(200, res.statusCode());
+        assertEquals(0, res.bodyAsBytes().length);
+    }
+
+    @Test void onProgressThrowingHandlerDoesNotMaskRequestException() throws IOException {
+        Connection session = Jsoup.newSession();
+        Progress<Connection.Response> failing = (processed, total, percent, response) -> { throw new RuntimeException("boom"); };
+
+        HttpStatusException e = assertThrows(HttpStatusException.class, () -> session.newRequest(echoUrl)
+            .header(EchoRoute.CodeParam, "500")
+            .ignoreHttpErrors(false)
+            .onProgress(failing)
+            .execute());
+        assertEquals(500, e.getStatusCode(), "the existing request exception is delivered, not the handler's");
+
+        // the session still works on the next request, with fresh progress state
+        ProgressTracker tracker = new ProgressTracker();
+        Document doc = session.newRequest(origin().hello.url()).onProgress(tracker).get();
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+        tracker.assertCompletedOnce(HelloBody.length());
+    }
 }

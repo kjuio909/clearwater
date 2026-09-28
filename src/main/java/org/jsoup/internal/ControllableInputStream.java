@@ -295,7 +295,7 @@ public class ControllableInputStream extends FilterInputStream {
         highWater = processed;
         lastEmitted = processed;
         float percent = contentLength > 0 ? Math.min(100f, processed * 100f / contentLength) : 0f;
-        progress.emit(processed, contentLength, percent);
+        deliver(processed, contentLength, percent);
     }
 
     /**
@@ -314,7 +314,20 @@ public class ControllableInputStream extends FilterInputStream {
         // 100% is reserved for the single terminal event confirmed at end-of-entity; an intermediate read that
         // already meets (or exceeds, e.g. with a compressed declared length) the total reports just below it
         if (percent >= 100f) percent = Math.nextDown(100f);
-        progress.emit(processed, contentLength, percent);
+        deliver(processed, contentLength, percent);
+    }
+
+    /**
+     * Delegates a progress event to the registered callback, isolating any {@link RuntimeException} the callback
+     * throws: the callback is a side-channel observer, so its failure must neither abort the read nor be forged into
+     * a completion. After such a failure the callback is detached and receives no further events for this request,
+     * while the network read, parsing, and close all continue as if no callback was registered.
+     */
+    private void deliver(int processed, int total, float percent) {
+        ProgressState<?> progress = this.progress;
+        if (progress == null) return;
+        if (!progress.emit(processed, total, percent))
+            this.progress = null;
     }
 
     /**
@@ -325,7 +338,6 @@ public class ControllableInputStream extends FilterInputStream {
      */
     private void complete() {
         highWater = Math.max(highWater, readPos);
-        ProgressState<?> progress = this.progress;
         if (progress == null || completed) return;
         completed = true;
         emittedInitial = true;
@@ -333,14 +345,14 @@ public class ControllableInputStream extends FilterInputStream {
         if (successful) {
             // once read to the end, an unknown length is resolved to the delivered length; a declared length is held
             int total = contentLength > 0 ? contentLength : processed;
-            progress.emit(processed, total, 100f);
+            deliver(processed, total, 100f);
         } else {
             // unsuccessful status: report the actual partial delivery, but hold below completion and keep total as
             // declared (-1 when unknown) so that the caller never mistakes it for a successful completion
             float percent = contentLength > 0
                 ? Math.min(Math.nextDown(100f), processed * 100f / contentLength)
                 : 0f;
-            progress.emit(processed, contentLength, percent);
+            deliver(processed, contentLength, percent);
         }
         this.progress = null; // detach: no later buffered hit may report another completion
     }
@@ -389,8 +401,19 @@ public class ControllableInputStream extends FilterInputStream {
             this.context = context;
         }
 
-        void emit(int processed, int total, float percent) {
-            callback.onProgress(processed, total, percent, context);
+        /**
+         * Invokes the callback and reports whether it returned normally. A {@link RuntimeException} thrown by the
+         * callback is swallowed here (progress is a side-channel observation that must never change the fetch
+         * result); {@code false} tells the caller to detach this failed callback for the rest of the request.
+         @return true if the callback accepted the event; false if it threw
+         */
+        boolean emit(int processed, int total, float percent) {
+            try {
+                callback.onProgress(processed, total, percent, context);
+                return true;
+            } catch (RuntimeException e) {
+                return false;
+            }
         }
     }
 }

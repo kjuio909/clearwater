@@ -414,6 +414,11 @@ public class HttpConnection implements Connection {
         return this;
     }
 
+    @Override public Connection onProgress(@Nullable Progress<Connection.Response> handler) {
+        req.responseProgress = handler; // null cancels any previously registered handler
+        return this;
+    }
+
     @SuppressWarnings("unchecked")
     private static abstract class Base<T extends Connection.Base<T>> implements Connection.Base<T> {
         private static final URL UnsetUrl; // only used if you created a new Request()
@@ -912,6 +917,19 @@ public class HttpConnection implements Connection {
                 && firstPort == secondPort;
         }
 
+        /**
+         * Delivers a progress event directly (used only when there is no body stream, e.g. an empty entity or a HEAD
+         * request), isolating a handler that throws: progress is observational, so the exception is swallowed and
+         * the fetch result is unchanged.
+         */
+        static <C> void emitProgress(Progress<C> handler, int processed, int total, float percent, C context) {
+            try {
+                handler.onProgress(processed, total, percent, context);
+            } catch (RuntimeException e) {
+                // a failing progress handler must never change the fetch result
+            }
+        }
+
         static Response execute(HttpConnection.Request req, @Nullable Response prevRes) throws IOException {
             Validate.isTrue(req.executing.tryLock(), "Multiple threads were detected trying to execute the same request concurrently. Make sure to use Connection#newRequest() and do not share an executing request between threads.");
             Validate.notNullParam(req, "req");
@@ -1014,7 +1032,7 @@ public class HttpConnection implements Connection {
                     // stream to read, yet the caller still needs a single determinable completion event rather than
                     // no progress at all; an unsuccessful status still never signals completion
                     if (req.responseProgress != null)
-                        req.responseProgress.onProgress(0, 0, successful ? 100f : 0f, res);
+                        emitProgress(req.responseProgress, 0, 0, successful ? 100f : 0f, res);
                 }
             } catch (IOException e) {
                 if (res != null) res.safeClose(); // will be non-null if got to conn
