@@ -63,6 +63,32 @@ public class SizesCleanerTest {
         assertEquals("<img sizes=\"(min-width: 30em) and (orientation: landscape) 100vw, 50vw\">", clean);
     }
 
+    @Test void bareMediaConditionIsKept() {
+        // the media condition need not be wrapped in an outer parenthesized group: a bare media type is valid
+        assertEquals("<img sizes=\"screen 50vw, 100vw\">",
+            Jsoup.clean("<img sizes='screen 50vw, 100vw'>", safelist()));
+        assertEquals("<img sizes=\"screen and (min-width: 30em) 50vw, 100vw\">",
+            Jsoup.clean("<img sizes='screen and (min-width: 30em) 50vw, 100vw'>", safelist()));
+        assertEquals("<img sizes=\"not screen 50vw, 100vw\">",
+            Jsoup.clean("<img sizes='not screen 50vw, 100vw'>", safelist()));
+        // a bare type with no length after it is still just a dropped entry
+        assertEquals("<img sizes=\"100vw\">",
+            Jsoup.clean("<img sizes='screen, 100vw'>", safelist()));
+        // per the literal grammar (non-empty, balanced, restricted charset) an empty () pair joined to a bare
+        // type does not invalidate the condition; only a wholly empty value is rejected
+        assertEquals("<img sizes=\"screen and () 50vw, 100vw\">",
+            Jsoup.clean("<img sizes='screen and () 50vw, 100vw'>", safelist()));
+    }
+
+    @Test void mediaConditionWithSlashOrBangIsRejected() {
+        // the restricted character set is alphanumerics, whitespace, '-', ':', '.', '<', '>', '=' and parens:
+        // a ratio slash or a negation bang is outside it, so only that entry is dropped
+        assertEquals("<img sizes=\"100vw\">",
+            Jsoup.clean("<img sizes='(aspect-ratio: 16/9) 50vw, 100vw'>", safelist()));
+        assertEquals("<img sizes=\"100vw\">",
+            Jsoup.clean("<img sizes='(width != 600px) 50vw, 100vw'>", safelist()));
+    }
+
     @Test void comparisonOperatorsAndNestedParensAreKept() {
         String clean = Jsoup.clean("<img sizes='(width >= 600px) and (100px <= width < 1000px) 80vw'>", safelist());
         // < and > are HTML-escaped on serialization, so assert the parsed attribute value rather than the markup
@@ -104,9 +130,17 @@ public class SizesCleanerTest {
             Jsoup.clean("<img sizes='calc(url(javascript:x)) 50vw, 100vw'>", safelist()));
     }
 
-    @Test void duplicateMediaConditionsAreKeptInOrder() {
-        String clean = Jsoup.clean("<img sizes='(min-width: 30em) 50vw, (min-width: 30em) 100vw'>", safelist());
-        assertEquals("<img sizes=\"(min-width: 30em) 50vw, (min-width: 30em) 100vw\">", clean);
+    @Test void duplicateEntriesAreDeduplicatedInFirstPosition() {
+        // a surviving entry with the exact same trimmed spelling as an earlier survivor appears once, first wins
+        String clean = Jsoup.clean("<img sizes='(min-width: 30em) 50vw, 100vw, (min-width: 30em) 50vw'>", safelist());
+        assertEquals("<img sizes=\"(min-width: 30em) 50vw, 100vw\">", clean);
+
+        clean = Jsoup.clean("<img sizes=' 100vw , 100vw, 50vw ,50vw'>", safelist());
+        assertEquals("<img sizes=\"100vw, 50vw\">", clean);
+
+        // same spelling separated by a dropped bad entry still collapses, and a later first-occurrence keeps order
+        clean = Jsoup.clean("<img sizes='50vw, garbage, 100vw, 50vw'>", safelist());
+        assertEquals("<img sizes=\"50vw, 100vw\">", clean);
     }
 
     // ===== calc =====
@@ -292,23 +326,44 @@ public class SizesCleanerTest {
         assertFalse(sizes.contains(",,") || sizes.contains(", ,"));
     }
 
+    @Test void controlCharactersDropOnlyThatEntry() {
+        // C0 controls are stripped from attribute values by the HTML parser before the cleaner runs, so they
+        // cannot reach a surviving entry; assert that nothing control-like leaks through regardless
+        Document clean = new Cleaner(safelist()).clean(
+            Jsoup.parseBodyFragment("<img sizes='50vw&#1;, 100vw'>"));
+        String sizes = clean.expectFirst("img").attr("sizes");
+        for (int i = 0; i < sizes.length(); i++) {
+            assertTrue(sizes.charAt(i) > 0x1f && sizes.charAt(i) != 0x7f);
+        }
+        // the C1 range U+0080-U+009F is not HTML-stripped and is control text, not printable content; it
+        // invalidates only the entry that carries it, in the media condition or inside a calc() length
+        for (char c : new char[] {'\u0080', '\u0085', '\u009f'}) {
+            assertEquals("<img sizes=\"100vw\">",
+                Jsoup.clean("<img sizes='screen" + c + " 50vw, 100vw'>", safelist()), "C1 in condition: " + Integer.toHexString(c));
+            assertEquals("<img sizes=\"100vw\">",
+                Jsoup.clean("<img sizes='calc(100vw " + c + " - 20px), 100vw'>", safelist()), "C1 in calc: " + Integer.toHexString(c));
+        }
+    }
+
     @Test void garbageValuesNeverInterruptCleaning() {
         String[] garbage = {
             "<img sizes=\"\u0000\u0001\u0007\" srcset=\"http://x/a.jpg 1x\">",
             "<img sizes=\"{{7*7}}\"><p>hello</p>",
             "<img sizes=\";\"><p>hello</p>",
             "<picture><source sizes=\"((((\"><img sizes=\"))))\" alt=\"ok\"></picture>",
+            // a numeric character reference decodes to a C1 control character, which is control text not printable content
+            "<img sizes=\"screen&#128; 50vw, 100vw\"><p>hello</p>",
         };
         Safelist sl = safelist();
         for (String html : garbage) {
             Document clean = assertDoesNotThrow(() -> new Cleaner(sl).clean(Jsoup.parseBodyFragment(html)));
-            // a surviving sizes value must never contain rejected punctuation or a control character
+            // a surviving sizes value must never contain rejected punctuation or a C0/C1 control character
             clean.select("[sizes]").forEach(el -> {
                 String v = el.attr("sizes");
                 assertFalse(v.contains(";") || v.contains("{") || v.contains("}"));
                 for (int i = 0; i < v.length(); i++) {
                     char c = v.charAt(i);
-                    assertTrue(c > 0x1f && c != 0x7f);
+                    assertTrue(c > 0x1f && c != 0x7f && (c < 0x80 || c > 0x9f));
                 }
             });
         }

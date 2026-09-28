@@ -14,9 +14,11 @@ import java.util.List;
  that opened the parentheses. Each entry has an optional media condition followed by a required length value:
  </p>
  <ul>
- <li>an optional media condition is a non-empty, parenthesis-balanced parenthesized expression containing only
-     letters, digits, whitespace, hyphens, colons, dots, comparison characters ({@code < = > ! /}), and nested
-     parentheses. A semicolon, brace, quote, control character, or any other character invalidates the entry;</li>
+ <li>an optional media condition is a non-empty, parenthesis-balanced expression containing only
+     letters, digits, whitespace, hyphens, colons, dots, comparison characters ({@code < = >}), and nested
+     parentheses; it need not be wrapped in an outer parenthesized group, so a bare media type such as
+     {@code screen} is acceptable. A semicolon, brace, quote, control character, or any other character invalidates
+     the entry;</li>
  <li>the length is either a zero or a non-negative decimal number immediately followed by one of
      {@code px, em, rem, vw, vh, vmin, vmax, ch, ex, %} (e.g. {@code 100vw}, {@code 0px}, {@code 1.5em}), or a
      balanced {@code calc()} expression whose body contains only digits, dots, whitespace, the {@code + - * /}
@@ -28,7 +30,8 @@ import java.util.List;
  references have already been decoded by the parser); the delimiting quotes are syntax only and never appear in the
  cleaned output. One malformed entry is dropped on its own and never swallows a following valid entry: after an
  unbalanced parenthesis, parsing resynchronizes at the next comma. Accepted entries are trimmed and joined in input
- order with a stable {@code ", "} separator; duplicate media conditions are kept as separate entries. When no entry
+ order with a stable {@code ", "} separator; a surviving entry with the exact same trimmed spelling as an earlier
+ survivor is emitted only once, at its first position, so re-cleaning is stable. When no entry
  survives, the attribute must be removed rather than left empty.
  </p>
  */
@@ -96,8 +99,12 @@ final class SizesCleaner {
                 boolean balanced = depth == 0 && !strayClose;
 
                 String normalized = validateEntry(entry, balanced);
-                if (normalized != null) accepted.add(normalized);
-                else if (!entry.trim().isEmpty() || !balanced) dropped++;
+                if (normalized != null) {
+                    // the cleaned value never carries a repeated entry: when the same spelling survives twice it
+                    // is emitted once, at its first position, so re-cleaning is stable
+                    if (accepted.contains(normalized)) dropped++;
+                    else accepted.add(normalized);
+                } else if (!entry.trim().isEmpty() || !balanced) dropped++;
 
                 if (pos < len && value.charAt(pos) == ',') pos++; // consume the separator
             }
@@ -181,20 +188,17 @@ final class SizesCleaner {
     }
 
     /**
-     Validate the media condition text. It must be non-empty, hold only the permitted media-query characters, and
-     have balanced nested parentheses. No semicolons, braces, quotes, or other punctuation that could carry
+     Validate the media condition text. It must hold a substantive token (a non-whitespace character other than a
+     parenthesis), only the permitted media-query characters, and have balanced nested parentheses; it need not be
+     wrapped in an outer parenthesized group, so a bare media type such as {@code screen} is acceptable, while an
+     empty {@code ()} group is not a condition. No semicolons, braces, quotes, or other punctuation that could carry
      stylesheet or script content; a script scheme smuggled in with whitespace inside its name is also rejected.
      */
     private static boolean isValidMediaCondition(String condition) {
         String s = condition.trim();
-        if (s.length() < 3 || s.charAt(0) != '(' || s.charAt(s.length() - 1) != ')') return false;
-        // the body of the outer group must hold more than whitespace: "()" is not a media condition
-        boolean hasContent = false;
-        for (int j = 1; j < s.length() - 1; j++) {
-            if (!StringUtil.isWhitespace(s.charAt(j))) { hasContent = true; break; }
-        }
-        if (!hasContent) return false;
+        if (s.isEmpty()) return false;
         int depth = 0;
+        boolean hasToken = false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '(') {
@@ -204,17 +208,18 @@ final class SizesCleaner {
                 if (depth < 0) return false;
             } else if (!isMediaConditionChar(c)) {
                 return false;
+            } else if (!StringUtil.isWhitespace(c)) {
+                hasToken = true; // an empty () or ( ) group is not a media condition
             }
         }
-        if (depth != 0) return false;
-        return true;
+        return depth == 0 && hasToken;
     }
 
     private static boolean isMediaConditionChar(char c) {
         if (c >= 'a' && c <= 'z') return true;
         if (c >= 'A' && c <= 'Z') return true;
         if (c >= '0' && c <= '9') return true;
-        return c == '-' || c == ':' || c == '.' || c == '<' || c == '>' || c == '=' || c == '!' || c == '/'
+        return c == '-' || c == ':' || c == '.' || c == '<' || c == '>' || c == '='
             || StringUtil.isWhitespace(c);
     }
 
@@ -371,14 +376,15 @@ final class SizesCleaner {
     /**
      Reject characters that can never appear in a valid entry: control characters (other than HTML whitespace),
      quotes, semicolons, and braces. These are the characters that could smuggle stylesheet or script content through
-     a length or media condition.
+     a length or media condition. Both the C0 range (and DEL) and the C1 range U+0080–U+009F count as control
+     characters here.
      */
     private static boolean containsUnsafeChar(String s) {
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '"' || c == '\'' || c == ';' || c == '{' || c == '}') return true;
             if (c <= 0x1f && !StringUtil.isWhitespace(c)) return true;
-            if (c == 0x7f) return true;
+            if (c == 0x7f || (c >= 0x80 && c <= 0x9f)) return true;
         }
         return false;
     }
