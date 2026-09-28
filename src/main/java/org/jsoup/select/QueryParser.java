@@ -312,7 +312,7 @@ public class QueryParser implements AutoCloseable {
     private Evaluator byClass() {
         String className = tq.consumeCssIdentifier();
         Validate.notEmpty(className);
-        return new Evaluator.Class(className.trim());
+        return new Evaluator.Class(className);
     }
 
     private Evaluator byTag() {

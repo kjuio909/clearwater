@@ -3012,6 +3012,137 @@ public class ElementTest {
         assertSame(a, doc.expectFirst(aQ));
     }
 
+    @Test void cssSelectorWithControlCharClassName() {
+        // Class tokens made of (or ending in) C0 control characters are serialized as CSS codepoint escapes
+        // (\XX). The class evaluator previously trimmed the decoded identifier, which dropped the control
+        // character (String.trim strips U+0001..U+001F), so the generated selector matched nothing.
+        Document doc = Jsoup.parse("<div><p></p><span></span><b></b></div>");
+        Element p = doc.expectFirst("p");
+        Element span = doc.expectFirst("span");
+        Element b = doc.expectFirst("b");
+        p.attributes().put("class", "\u0001");
+        span.attributes().put("class", ";r 3ab \u000E"); // tokens: ;r, 3ab, and a bare control char
+        b.attributes().put("class", "x\u0014");
+
+        String pQ = p.cssSelector();
+        assertEquals("html > body > div > p.\\1 ", pQ);
+        assertSame(p, doc.expectFirst(pQ));
+        assertEquals(1, doc.select(pQ).size());
+
+        String spanQ = span.cssSelector();
+        assertSame(span, doc.expectFirst(spanQ));
+        assertEquals(1, doc.select(spanQ).size());
+
+        String bQ = b.cssSelector();
+        assertSame(b, doc.expectFirst(bQ));
+        assertEquals(1, doc.select(bQ).size());
+
+        // deterministic, verbatim on repeat
+        assertEquals(pQ, p.cssSelector());
+        assertEquals(spanQ, span.cssSelector());
+        assertEquals(bQ, b.cssSelector());
+    }
+
+    @ParameterizedTest @MethodSource("cssSelectorUniqueStableAndRoundTrippableCases")
+    void cssSelectorIsUniqueStableAndRoundTrippable(String html) {
+        Document doc = Jsoup.parse(html);
+        String serialized = doc.html();
+
+        // every element gets a selector that, run on the document, hits exactly that element, once
+        for (Element el : doc.select("*")) {
+            if (el instanceof Document) continue;
+            String css = el.cssSelector();
+            assertEquals(css, el.cssSelector()); // stable / verbatim on repeat
+            Elements hits = doc.select(css);
+            assertEquals(1, hits.size(), () -> css + " for " + cssPath(el));
+            assertSame(el, hits.first());
+        }
+        assertEquals(serialized, doc.html()); // generation must not mutate the DOM
+
+        // serialize and reparse: the same selector string must resolve to the same structural position
+        Document reparsed = Jsoup.parse(serialized);
+        List<Element> before = doc.select("*");
+        List<Element> after = reparsed.select("*");
+        assertEquals(before.size(), after.size());
+        for (int i = 0; i < before.size(); i++) {
+            Element a = before.get(i);
+            if (a instanceof Document) continue;
+            String css = a.cssSelector();
+            Elements hits = reparsed.select(css);
+            assertEquals(1, hits.size(), css);
+            assertEquals(cssPath(a), cssPath(hits.first()));
+        }
+    }
+
+    static Stream<Arguments> cssSelectorUniqueStableAndRoundTrippableCases() {
+        return Stream.of(
+            // root, body, head
+            Arguments.of("<html><head><title>x</title></head><body><p>hi</p></body></html>"),
+            // nested lists
+            Arguments.of("<ul><li>1<ol><li>a</li><li>b</li></ol></li><li>2</li></ul>"),
+            // table rows with implicit tbody and rowspan
+            Arguments.of("<table><thead><tr><th>h1</th><th>h2</th></tr></thead>"
+                + "<tbody><tr><td rowspan=2>a</td><td>b</td></tr><tr><td>d</td></tr></tbody></table>"),
+            // picture internals, incl. void elements
+            Arguments.of("<picture><source media=x><source media=y><img src=z alt=w></picture>"),
+            // duplicate ids across different structures
+            Arguments.of("<header id=x><div id=x></div></header><section id=x><a id=x></a></section>"),
+            // one class shared by siblings of different tags
+            Arguments.of("<div class=x></div><span class=x></span><p class=x>"),
+            // the same class on every element
+            Arguments.of("<div class='flex p-4'><span class='flex p-4'><em class='flex p-4'>x</em></span></div>"),
+            // ids / classes with spaces, quotes, backslashes, colons, parens, brackets, wildcards, leading digits
+            Arguments.of("<div id='a b c'></div>"
+                + "<p id=\"a:b(c)[d]*e\\f&quot;g\"></p>"
+                + "<span id='1abc' class='-1abc .x:y [z] * w'></span>"
+                + "<a id='-1abc' class='a,b+c~d>e'></a>"
+                + "<b id='café' class='日本語 naïve'></b>"),
+            // entity-decoded identifier values
+            Arguments.of("<div id='a&amp;b' class='x&lt;y z&gt;w'></div>"),
+            // id that looks like a pseudo-class or compound selector
+            Arguments.of("<p id='first-child'></p><p id='nth-child(3)'></p><p id='a#b.c[d]'></p>"),
+            // case-normalized tags and attributes, and auto-completed paragraphs / options
+            Arguments.of("<DIV CLASS='X'>y</DIV><a>z</a><p>para<select><option>a</option>"
+                + "<optgroup label=g><option>b</option></optgroup></select>tail"),
+            // deep nesting with repeated structures
+            Arguments.of("<div><ul><li><ul><li><ul><li>x</li><li>y</li></ul></li></ul></li>"
+                + "<li>z</li></ul></div>"),
+            // nested tables
+            Arguments.of("<table><tbody><tr><td><table><tbody><tr><td>inner</td></tr></tbody>"
+                + "</table></td></tr></tbody></table>")
+        );
+    }
+
+    // structural path of an element using element-only sibling indices (independent of text nodes)
+    private static String cssPath(Element el) {
+        StringBuilder sb = StringUtil.borrowBuilder();
+        Node n = el;
+        while (n instanceof Element) {
+            Element e = (Element) n;
+            sb.insert(0, ">" + e.tagName() + ":nth-child(" + (e.elementSiblingIndex() + 1) + ")");
+            n = n.parentNode;
+        }
+        return StringUtil.releaseBuilder(sb);
+    }
+
+    @Test void cssSelectorRoundTripsAfterReparseForSameElement() {
+        Document doc = Jsoup.parse("<div id='a.b'><span class='x y'></span></div><ul><li>1</li><li>2</li></ul>");
+        Element span = doc.expectFirst("span");
+        Element li2 = doc.expectFirst("ul > li:nth-child(2)");
+
+        String spanQ = span.cssSelector();
+        String liQ = li2.cssSelector();
+
+        Document reparsed = Jsoup.parse(doc.html());
+        assertEquals(1, reparsed.select(spanQ).size());
+        assertEquals("span", reparsed.expectFirst(spanQ).tagName());
+        assertEquals(1, reparsed.select(liQ).size());
+        assertEquals("2", reparsed.expectFirst(liQ).text());
+
+        // other nodes, attributes, and order are untouched
+        assertEquals(doc.html(), reparsed.html());
+    }
+
     @Test void orphanSiblings() {
         Element el = new Element("div");
         assertEquals(0, el.siblingElements().size());
