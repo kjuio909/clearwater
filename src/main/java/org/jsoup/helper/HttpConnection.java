@@ -1013,8 +1013,13 @@ public class HttpConnection implements Connection {
                     // an empty entity (explicit zero length, or a HEAD request that delivers no body) has no body
                     // stream to read, yet the caller still needs a single determinable completion event rather than
                     // no progress at all; an unsuccessful status still never signals completion
-                    if (req.responseProgress != null)
-                        req.responseProgress.onProgress(0, 0, successful ? 100f : 0f, res);
+                    if (req.responseProgress != null) {
+                        try {
+                            req.responseProgress.onProgress(0, 0, successful ? 100f : 0f, res);
+                        } catch (RuntimeException e) {
+                            // a throwing progress callback is isolated and must not affect the request
+                        }
+                    }
                 }
             } catch (IOException e) {
                 if (res != null) res.safeClose(); // will be non-null if got to conn

@@ -547,6 +547,10 @@ public interface Connection {
      successfully; the usual exception semantics are unchanged.</li>
      <li>The handler only observes progress; it does not affect parsing, the returned content, request headers, or
      redirect handling. Registering a handler replaces any previously registered handler for that request.</li>
+     <li>If the handler throws a {@link RuntimeException}, the exception is swallowed: the request continues to
+     completion (or to its usual exception) exactly as if no handler were registered, and the handler receives no
+     further events for that request. A later request on the same connection starts with fresh progress state and is
+     not affected by a previous handler failure.</li>
      </ul>
      @param handler the progress handler
      @return this Connection, for chaining

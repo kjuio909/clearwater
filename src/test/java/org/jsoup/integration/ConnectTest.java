@@ -1556,4 +1556,57 @@ public class ConnectTest {
         assertEquals("Hello, World!", doc.expectFirst("p").text());
         ok.assertCompletedOnce(HelloBody.length());
     }
+
+    @Test void throwingProgressCallbackDoesNotAffectFetch() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        Document doc = Jsoup.connect(origin().hello.url())
+            .onResponseProgress((processed, total, percent, response) -> {
+                calls.incrementAndGet();
+                throw new RuntimeException("observer failure");
+            })
+            .get();
+
+        // the fetch consumes the entity and returns the same document as with no callback registered
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+        assertEquals(1, calls.get(), "a failed callback receives no further events, and no completion is fabricated");
+    }
+
+    @Test void throwingProgressCallbackOnBodilessResponseIsIsolated() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        Connection.Response res = Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .method(Method.HEAD)
+            .onResponseProgress((processed, total, percent, response) -> {
+                calls.incrementAndGet();
+                throw new RuntimeException("observer failure");
+            })
+            .execute();
+
+        assertEquals(200, res.statusCode());
+        assertEquals(0, res.bodyAsBytes().length);
+        assertEquals(1, calls.get(), "the single completion event is attempted once; its failure is contained");
+    }
+
+    @Test void throwingProgressCallbackDoesNotLatchAcrossRequests() throws IOException {
+        Connection con = Jsoup.connect(origin().hello.url());
+        AtomicInteger failingCalls = new AtomicInteger();
+        Progress<Connection.Response> flaky = (processed, total, percent, response) -> {
+            failingCalls.incrementAndGet();
+            throw new RuntimeException("observer failure");
+        };
+
+        Document first = con.onResponseProgress(flaky).get();
+        assertEquals("Hello, World!", first.expectFirst("p").text());
+        int firstCalls = failingCalls.get();
+        assertTrue(firstCalls >= 1);
+
+        // same connection, same throwing callback: the next request starts with fresh state and is isolated again
+        Document second = con.url(origin().hello.url()).get();
+        assertEquals("Hello, World!", second.expectFirst("p").text());
+        assertTrue(failingCalls.get() > firstCalls, "the callback is re-attached for the new request");
+
+        // and a healthy callback on the same connection completes normally
+        ProgressTracker ok = new ProgressTracker();
+        con.onResponseProgress(ok).get();
+        ok.assertCompletedOnce(HelloBody.length());
+    }
 }

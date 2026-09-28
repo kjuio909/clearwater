@@ -340,6 +340,65 @@ class ControllableInputStreamTest {
         in.close();
     }
 
+    @Test
+    void throwingCallbackIsIsolatedAndReadStillCompletes() throws IOException {
+        int size = 10_000;
+        byte[] data = new byte[size];
+        for (int i = 0; i < size; i++) data[i] = (byte) i;
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+        AtomicInteger calls = new AtomicInteger();
+        in.onProgress(size, true, (processed, total, percent, context) -> {
+            if (calls.incrementAndGet() == 3) throw new RuntimeException("observer failure");
+        }, in);
+
+        byte[] buf = new byte[4096];
+        int delivered = 0, read;
+        while ((read = in.read(buf)) != -1) delivered += read; // must not be broken by the callback
+
+        assertEquals(size, delivered, "the entity is fully delivered despite the throwing callback");
+        assertEquals(3, calls.get(), "events stop at the failure; no completion is fabricated afterwards");
+        in.close();
+    }
+
+    @Test
+    void throwingCallbackOnEmptyEntityIsIsolated() throws IOException {
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[0]), 0);
+        AtomicInteger calls = new AtomicInteger();
+        in.onProgress(0, true, (processed, total, percent, context) -> {
+            calls.incrementAndGet();
+            throw new RuntimeException("observer failure");
+        }, in);
+
+        readAll(in);
+        readAll(in); // a second drain must not re-notify the failed callback
+        assertEquals(1, calls.get(), "the single completion event is attempted once and its failure is contained");
+        in.close();
+    }
+
+    @Test
+    void callbackFailureDoesNotLatchAcrossRegistrations() throws IOException {
+        // each registration (as happens per request) carries its own independent failure state
+        int size = 10_000;
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[size]), 0);
+        AtomicInteger failingCalls = new AtomicInteger();
+        in.onProgress(size, true, (processed, total, percent, context) -> {
+            failingCalls.incrementAndGet();
+            throw new RuntimeException("observer failure");
+        }, in);
+
+        byte[] buf = new byte[100];
+        in.read(buf);
+        in.read(buf);
+        assertEquals(1, failingCalls.get(), "the failed callback is detached for the rest of this registration");
+
+        ProgressEvents second = new ProgressEvents();
+        in.onProgress(size, true, second, in); // a fresh registration observes independently
+        readAll(in);
+        assertEquals(1, second.countOf(100f), "the new registration still sees its own completion");
+        assertEquals(1, failingCalls.get(), "the failed callback stays detached");
+        in.close();
+    }
+
     private static final class CountingInputStream extends FilterInputStream {
         int count = 0;
 

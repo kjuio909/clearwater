@@ -383,6 +383,7 @@ public class ControllableInputStream extends FilterInputStream {
     private static class ProgressState<ProgressContext> {
         private final Progress<ProgressContext> callback;
         private final ProgressContext context;
+        private boolean failed; // a throwing callback is isolated: it observes no further events for this request
 
         ProgressState(Progress<ProgressContext> callback, ProgressContext context) {
             this.callback = callback;
@@ -390,7 +391,14 @@ public class ControllableInputStream extends FilterInputStream {
         }
 
         void emit(int processed, int total, float percent) {
-            callback.onProgress(processed, total, percent, context);
+            if (failed) return; // a failed callback never sees a later (or fabricated completion) event
+            try {
+                callback.onProgress(processed, total, percent, context);
+            } catch (RuntimeException e) {
+                // progress is observational only: a callback failure must not affect the fetch, so it is
+                // swallowed here and the callback is detached from the rest of this request
+                failed = true;
+            }
         }
     }
 }
