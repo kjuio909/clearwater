@@ -5,6 +5,8 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -367,5 +369,61 @@ public class SizesCleanerTest {
                 }
             });
         }
+    }
+
+    // ===== pathological input must stay linear and stack-safe =====
+
+    @Test void deeplyNestedCalcIsValidatedWithoutStackOverflow() {
+        // a balanced calc nested thousands deep must validate (the grammar is recursive but parsing must be
+        // iterative); the project test JVM runs with a deliberately small 640k stack
+        int depth = 20_000;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < depth; i++) sb.append("calc(");
+        sb.append("100vw");
+        for (int i = 0; i < depth; i++) sb.append(')');
+        String calc = sb.toString();
+        String clean = assertTimeout(Duration.ofSeconds(5),
+            () -> Jsoup.clean("<img sizes='" + calc + "'>", safelist()));
+        assertEquals("<img sizes=\"" + calc + "\">", clean);
+    }
+
+    @Test void deeplyNestedMalformedCalcFailsWithoutStackOverflow() {
+        // the same nesting with an illegal body is rejected entry-by-entry, never crashing the cleaner
+        int depth = 20_000;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < depth; i++) sb.append("calc(");
+        sb.append("url(http://x)"); // illegal inside calc at any depth
+        for (int i = 0; i < depth; i++) sb.append(')');
+        sb.append(", 100vw");
+        String clean = assertTimeout(Duration.ofSeconds(5),
+            () -> Jsoup.clean("<img sizes='" + sb + "'>", safelist()));
+        assertEquals("<img sizes=\"100vw\">", clean);
+    }
+
+    @Test void manyDistinctEntriesAreCleanedInLinearTime() {
+        // tens of thousands of distinct valid entries must not quadratic-scan a duplicate list
+        StringBuilder sizes = new StringBuilder();
+        for (int i = 1; i <= 50_000; i++) {
+            if (i > 1) sizes.append(", ");
+            sizes.append(i).append("vw");
+        }
+        Document clean = assertTimeout(Duration.ofSeconds(5), () -> new Cleaner(safelist())
+            .clean(Jsoup.parseBodyFragment("<img sizes=\"" + sizes + "\">")));
+        Element img = clean.expectFirst("img");
+        String value = img.attr("sizes");
+        assertTrue(value.startsWith("1vw"));
+        assertTrue(value.endsWith("50000vw"));
+        assertEquals(50_000, value.split(", ").length);
+    }
+
+    @Test void manyUnclosedGroupsResyncInLinearTime() {
+        // each unclosed group would, with a rescanning parser, re-walk the whole tail; the trailing legal entry must
+        // still survive and the whole clean must stay linear
+        StringBuilder sizes = new StringBuilder();
+        for (int i = 0; i < 50_000; i++) sizes.append("(x,");
+        sizes.append("100vw");
+        Document clean = assertTimeout(Duration.ofSeconds(5), () -> new Cleaner(safelist())
+            .clean(Jsoup.parseBodyFragment("<img sizes=\"" + sizes + "\">")));
+        assertEquals("100vw", clean.expectFirst("img").attr("sizes"));
     }
 }

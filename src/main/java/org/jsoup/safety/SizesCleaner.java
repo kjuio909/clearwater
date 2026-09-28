@@ -3,7 +3,10 @@ package org.jsoup.safety;
 import org.jsoup.internal.StringUtil;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  Validates and rewrites {@code sizes} attributes, one size entry at a time, so the browser receives trustworthy
@@ -56,62 +59,116 @@ final class SizesCleaner {
      case the attribute must be removed rather than left empty
      */
     static Result clean(String rawValue) {
-        List<String> accepted = new ArrayList<>();
+        Set<String> accepted = new LinkedHashSet<>();
         int dropped = 0;
         if (rawValue != null && !rawValue.isEmpty()) {
             String value = stripQuotes(rawValue.trim()); // a quote pair wrapping the whole attribute value
-            int len = value.length();
-            int pos = 0;
 
-            while (pos < len) {
-                // Splitting loop: collect one entry. Commas separate entries only at depth zero; a comma inside a
-                // balanced parenthesized region is entry content. An unmatched ')' ends the entry at that point (the
-                // entry is rejected); an unmatched '(' would otherwise run to the end, so the first comma inside it
-                // is remembered and used as a resync point when the group never closes, so a following valid entry
-                // is not swallowed.
-                int entryStart = pos;
-                int depth = 0;
-                int deepComma = -1;
-                boolean strayClose = false;
-                while (pos < len) {
-                    char c = value.charAt(pos);
-                    if (c == '(') {
-                        depth++;
-                    } else if (c == ')') {
-                        depth--;
-                        if (depth < 0) strayClose = true;
-                    } else if (c == ',') {
-                        if (depth <= 0) break; // top-level separator
-                        if (deepComma < 0) deepComma = pos; // first separator inside an unclosed group
-                    }
-                    pos++;
-                }
-
-                String entry;
-                if (pos >= len && depth > 0 && deepComma >= 0) {
-                    // the group never closed: reject the run up to its first inner comma, and reparse every later
-                    // comma-separated chunk as its own entry, so a trailing legal entry is not swallowed
-                    entry = value.substring(entryStart, deepComma);
-                    pos = deepComma;
-                } else {
-                    entry = value.substring(entryStart, pos);
-                }
-                boolean balanced = depth == 0 && !strayClose;
-
-                String normalized = validateEntry(entry, balanced);
+            List<int[]> chunks = splitEntries(value);
+            for (int[] chunk : chunks) {
+                String entry = value.substring(chunk[0], chunk[1]).trim();
+                String normalized = validateEntry(entry);
                 if (normalized != null) {
                     // the cleaned value never carries a repeated entry: when the same spelling survives twice it
                     // is emitted once, at its first position, so re-cleaning is stable
-                    if (accepted.contains(normalized)) dropped++;
-                    else accepted.add(normalized);
-                } else if (!entry.trim().isEmpty() || !balanced) dropped++;
-
-                if (pos < len && value.charAt(pos) == ',') pos++; // consume the separator
+                    if (!accepted.add(normalized)) dropped++;
+                } else if (!entry.isEmpty()) {
+                    dropped++;
+                }
             }
         }
 
         if (accepted.isEmpty()) return new Result(null, dropped, true);
         return new Result(join(accepted), dropped, false);
+    }
+
+    /**
+     Split a sizes value into entry character ranges {@code [start, end)} using the top-level commas only.
+     <p>
+     One forward scan records the running parenthesis depth at every comma and at the end. An entry starts at depth
+     zero of its own, so a comma ends an entry while at (or below) the depth recorded at the entry's first character;
+     a comma nested deeper is inside that entry's parenthesized content (the whole entry is validated later and fails
+     as one, because neither a media condition nor a calc() body may contain a comma). When the value ends with
+     groups still open, parsing recovers at the first comma inside the unclosed group and continues with that comma's
+     depth as the new baseline, so a malformed entry never swallows a following valid one.
+     </p>
+     <p>
+     The recovery is reproduced without rescanning: for each comma a monotonic stack gives the nearest later comma at
+     no greater depth, and recovery moves to the immediately following comma (a strictly greater depth) while the end
+     is still unclosed. Both passes and the boundary walk are linear, even for values made of thousands of unbalanced
+     groups.
+     </p>
+     @return entry ranges in input order; ranges may be empty for consecutive commas
+     */
+    private static List<int[]> splitEntries(String value) {
+        int len = value.length();
+        int[] commaPos = new int[Math.min(8, len)];
+        int[] commaDepth = new int[commaPos.length];
+        int commas = 0;
+        int depth = 0;
+        for (int p = 0; p < len; p++) {
+            char c = value.charAt(p);
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',') {
+                if (commas == commaPos.length) {
+                    commaPos = Arrays.copyOf(commaPos, commas * 2);
+                    commaDepth = Arrays.copyOf(commaDepth, commas * 2);
+                }
+                commaPos[commas] = p;
+                commaDepth[commas] = depth;
+                commas++;
+            }
+        }
+        int endDepth = depth;
+
+        // nextLE[i] is the nearest later comma at a depth no greater than comma i's: the next ordinary boundary once
+        // an entry starts at comma i. A monotonic stack (greater depths popped) computes all of them in reverse.
+        int[] nextLE = new int[commas];
+        int[] stack = new int[commas];
+        int stackSize = 0;
+        int firstLEZero = -1; // earliest comma at or below the initial depth zero
+        for (int i = commas - 1; i >= 0; i--) {
+            int d = commaDepth[i];
+            while (stackSize > 0 && commaDepth[stack[stackSize - 1]] > d) stackSize--;
+            nextLE[i] = stackSize > 0 ? stack[stackSize - 1] : -1;
+            stack[stackSize++] = i;
+            if (d <= 0) firstLEZero = i;
+        }
+
+        // Walk the boundaries. Baseline depth is the depth at the previous boundary comma (zero before the first).
+        // The next boundary is the nearest later comma at no greater depth; when none exists before the end yet the
+        // value still leaves groups open, recovery starts the next entry at the very next comma instead.
+        boolean[] boundary = new boolean[commas];
+        int pos = -1;
+        int baseDepth = 0;
+        while (true) {
+            int next = (pos < 0) ? firstLEZero : nextLE[pos];
+            if (next >= 0) {
+                boundary[next] = true;
+                pos = next;
+                baseDepth = commaDepth[next];
+            } else if (endDepth > baseDepth && pos + 1 < commas) {
+                // this entry never closed: recover at its first inner comma (a strictly greater depth)
+                int recover = pos + 1;
+                boundary[recover] = true;
+                pos = recover;
+                baseDepth = commaDepth[recover];
+            } else {
+                break;
+            }
+        }
+
+        List<int[]> chunks = new ArrayList<>(commas + 1);
+        int start = 0;
+        for (int i = 0; i < commas; i++) {
+            if (boundary[i]) {
+                chunks.add(new int[]{start, commaPos[i]});
+                start = commaPos[i] + 1;
+            }
+        }
+        chunks.add(new int[]{start, len});
+        return chunks;
     }
 
     /** The outcome of cleaning a sizes attribute: the rewritten {@code value} (or null) and statistics. */
@@ -128,18 +185,19 @@ final class SizesCleaner {
     }
 
     /**
-     Validate one raw entry and return its trimmed spelling, or {@code null} when it is malformed. {@code balanced}
-     reports whether the collected run ended at parenthesis depth zero; an unbalanced run can never be a valid media
-     condition or length.
+     Validate one entry (a top-level-comma-delimited range from {@link #splitEntries}) and return its trimmed
+     spelling, or {@code null} when it is malformed.
      <p>
-     A media condition may span several parenthesized groups joined by keywords ({@code (min-width: 30em) and
-     (orientation: landscape)}), so the length is located at the end of the entry: either a whitespace-free scalar
-     suffix, or a balanced {@code calc(...)} group. Anything before it is the optional media condition.
+     An entry is rejected outright when its parentheses do not balance (a stray close, or a group that never closes);
+     the splitter's recovery keeps that imbalance from leaking across entries. A media condition may span several
+     parenthesized groups joined by keywords ({@code (min-width: 30em) and (orientation: landscape)}), so the length
+     is located at the end of the entry: either a whitespace-free scalar suffix, or a balanced {@code calc(...)}
+     group. Anything before it is the optional media condition.
      </p>
      */
-    private static String validateEntry(String entry, boolean balanced) {
+    private static String validateEntry(String entry) {
         String trimmed = stripQuotes(entry.trim()); // a quote pair delimiting this single entry
-        if (trimmed.isEmpty() || !balanced) return null;
+        if (trimmed.isEmpty() || !isParenBalanced(trimmed)) return null;
         if (containsUnsafeChar(trimmed)) return null;
         if (containsScriptFragment(trimmed)) return null;
 
@@ -156,6 +214,17 @@ final class SizesCleaner {
             if (!isValidMediaCondition(condition.trim())) return null;
         }
         return trimmed;
+    }
+
+    /** Whether every parenthesis in the entry opens and closes within it, in proper nesting order. */
+    private static boolean isParenBalanced(String s) {
+        int depth = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '(') depth++;
+            else if (c == ')' && --depth < 0) return false;
+        }
+        return depth == 0;
     }
 
     /**
@@ -233,7 +302,7 @@ final class SizesCleaner {
             // only a calc(...) expression may lead with a letter; any other word (url, expression, attr, ...) is out
             if (!startsWithCalc(s)) return false;
             if (s.charAt(s.length() - 1) != ')') return false;
-            return isValidCalcBody(s.substring(5, s.length() - 1));
+            return isValidCalcBody(s, 5, s.length() - 1);
         }
         return isScalarLength(s);
     }
@@ -243,87 +312,126 @@ final class SizesCleaner {
     }
 
     /**
-     Validate the body of a {@code calc()} expression: balanced parentheses, and only non-negative scalars with
-     recognized units (or bare numbers) joined by the {@code + - * /} operators. There is no leading minus, no empty
-     operand, no URL, no semicolon, and no brace.
+     Validate the body of a {@code calc()} expression over the index range {@code [from, to)} of {@code s}: balanced
+     parentheses, and only non-negative scalars with recognized units (or bare numbers) joined by the
+     {@code + - * /} operators. There is no leading minus, no empty operand, no URL, no semicolon, and no brace.
+     <p>
+     The expression is validated in place with a single flat token scan, mirroring the grammar one nesting level at a
+     time: plain parenthesized groups are counted inline, while a nested {@code calc(...)} pushes its body range as a
+     frame on heap-allocated arrays. Neither the call stack nor a per-level copy grows with nesting depth, so a deeply
+     nested (or pathologically long) expression cannot exhaust the stack or quadratic memory.
+     </p>
      */
-    private static boolean isValidCalcBody(String body) {
-        String s = body.trim();
-        if (s.isEmpty()) return false;
-        char first = s.charAt(0);
-        if (first == '-' || first == '+' || first == '*' || first == '/') return false;
+    private static boolean isValidCalcBody(String s, int from, int to) {
+        int a = from;
+        int b = to;
+        while (a < b && StringUtil.isWhitespace(s.charAt(a))) a++;
+        while (b > a && StringUtil.isWhitespace(s.charAt(b - 1))) b--;
+        if (a == b) return false; // empty body, e.g. calc()
 
-        int depth = 0;
-        int i = 0;
-        int n = s.length();
-        boolean prevOperand = false; // the previous token was a scalar or ')', so an operator may come next
-        while (i < n) {
-            char c = s.charAt(i);
-            if (StringUtil.isWhitespace(c)) { i++; continue; }
+        // Greedily pair parentheses within the body in one linear pass; an unmatched open or close fails the body.
+        int[] match = new int[s.length()];
+        Arrays.fill(match, -1);
+        int[] parenStack = new int[b - a + 1];
+        int parenDepth = 0;
+        for (int p = a; p < b; p++) {
+            char c = s.charAt(p);
             if (c == '(') {
-                if (prevOperand) return false; // an operand must be followed by an operator, not a group
-                depth++;
-                i++;
-                continue;
+                parenStack[parenDepth++] = p;
+            } else if (c == ')') {
+                if (parenDepth == 0) return false; // unmatched close
+                int open = parenStack[--parenDepth];
+                match[open] = p;
+                match[p] = open;
             }
-            if (c == ')') {
-                depth--;
-                if (depth < 0 || !prevOperand) return false; // empty group or unbalanced close
-                i++;
-                continue;
-            }
-            if (c == '+' || c == '-' || c == '*' || c == '/') {
-                if (!prevOperand) return false; // missing left operand (also rejects doubled operators)
-                prevOperand = false;
-                i++;
-                continue;
-            }
-            if (isAsciiLetter(c)) {
-                // the only word legal at an operand position is a nested calc(...): a balanced group over the same
-                // grammar. Any other word (url, expression, attr, an unknown unit spelling, ...) is rejected.
-                if (!s.regionMatches(true, i, "calc(", 0, 5)) return false;
-                int close = matchingClose(s, i + 5);
-                if (close < 0 || !isValidCalcBody(s.substring(i + 5, close))) return false;
-                i = close + 1;
-                if (i < n) {
+        }
+        if (parenDepth != 0) return false; // unmatched open
+
+        // Frames are the nested calc() bodies (the recursive calls in a direct transcription). A plain parenthesized
+        // group is not a frame: it is counted by the frame's own depth, so a group closing behaves exactly like the
+        // operand that ended it. Frame 0 is the outer body.
+        int maxFrames = parenStack.length + 1;
+        int[] frameEnd = new int[maxFrames];
+        int[] frameDepth = new int[maxFrames];
+        boolean[] framePrevOperand = new boolean[maxFrames];
+        int frames = 1;
+        frameEnd[0] = b;
+
+        int i = a;
+        while (true) {
+            int end = frameEnd[frames - 1];
+            while (i < end && StringUtil.isWhitespace(s.charAt(i))) i++;
+            if (i == end) {
+                // reached the close of this calc() body (or the end of the outer body): it must hold a complete
+                // expression, every plain group closed
+                if (frameDepth[frames - 1] != 0 || !framePrevOperand[frames - 1]) return false;
+                frames--;
+                if (frames == 0) return true;
+                i++; // step past the nested calc's ')' into the parent body
+                // the character directly following a nested calc() group must be whitespace, an operator, or a
+                // closing parenthesis of the parent body
+                int parentEnd = frameEnd[frames - 1];
+                if (i < parentEnd) {
                     char next = s.charAt(i);
                     if (!StringUtil.isWhitespace(next) && next != '+' && next != '-' && next != '*'
                         && next != '/' && next != ')') return false;
                 }
-                prevOperand = true;
+                framePrevOperand[frames - 1] = true; // a completed calc() group is itself an operand
                 continue;
             }
-            // otherwise a scalar operand: a non-negative number with an optional recognized unit
-            int numEnd = readNumber(s, i);
-            if (numEnd == i) return false;
-            int afterUnit = readUnit(s, numEnd);
-            if (afterUnit != numEnd) {
-                i = afterUnit; // a unit followed the number
+            char c = s.charAt(i);
+            if (c == '+' || c == '-' || c == '*' || c == '/') {
+                if (!framePrevOperand[frames - 1]) return false; // missing left operand, or a doubled operator
+                framePrevOperand[frames - 1] = false;
+                i++;
+            } else if (c == '(') {
+                if (framePrevOperand[frames - 1]) return false; // an operand must be joined to a group by an operator
+                frameDepth[frames - 1]++;
+                i++;
+            } else if (c == ')') {
+                int depth = frameDepth[frames - 1] - 1;
+                if (depth < 0 || !framePrevOperand[frames - 1]) return false; // an empty or unbalanced group
+                frameDepth[frames - 1] = depth;
+                i++;
+            } else if (isAsciiLetter(c)) {
+                // the only word legal at an operand position is a nested calc(...), validated over the same grammar;
+                // any other word (url, expression, attr, an unknown unit spelling, ...) is rejected
+                if (i + 5 > end || !s.regionMatches(true, i, "calc(", 0, 5)) return false;
+                int groupOpen = i + 4;
+                int groupClose = match[groupOpen];
+                if (groupClose < 0 || groupClose >= end) return false; // unclosed, or closes outside this body
+                frameEnd[frames] = groupClose;
+                frameDepth[frames] = 0;
+                framePrevOperand[frames] = false;
+                frames++;
+                i = groupOpen + 1;
             } else {
-                i = numEnd; // bare number (legal inside calc), but never a bare word or unknown unit
-                if (i < n && isAsciiLetter(s.charAt(i))) return false;
+                // a scalar operand: a non-negative number with an optional recognized unit
+                int numEnd = readNumber(s, i, end);
+                if (numEnd == i) return false;
+                int afterUnit = readUnit(s, numEnd, end);
+                i = (afterUnit != numEnd) ? afterUnit : numEnd; // a unit followed the number, or a bare number
+                // the operand must end at whitespace, an operator, a closing parenthesis, or the end of the body;
+                // a bare word glued on after a bare number is rejected
+                if (i < end) {
+                    char next = s.charAt(i);
+                    if (!StringUtil.isWhitespace(next) && next != '+' && next != '-' && next != '*'
+                        && next != '/' && next != ')') return false;
+                }
+                framePrevOperand[frames - 1] = true;
             }
-            // the operand must end at whitespace, an operator, a parenthesis, or the end of the body
-            if (i < n) {
-                char next = s.charAt(i);
-                if (!StringUtil.isWhitespace(next) && next != '+' && next != '-' && next != '*'
-                    && next != '/' && next != ')') return false;
-            }
-            prevOperand = true;
         }
-        return depth == 0 && prevOperand;
     }
 
     /** Read a non-negative decimal number ({@code 0}, {@code 12}, {@code 1.5}, {@code .5}); no sign or exponent. */
-    private static int readNumber(String s, int start) {
+    private static int readNumber(String s, int start, int limit) {
         int i = start;
-        int n = s.length();
         int digits = 0;
-        while (i < n && isAsciiDigit(s.charAt(i))) { digits++; i++; }
-        if (i < n && s.charAt(i) == '.') {
+        while (i < limit && isAsciiDigit(s.charAt(i))) { digits++; i++; }
+        if (i < limit && s.charAt(i) == '.') {
             i++;
             int frac = 0;
-            while (i < n && isAsciiDigit(s.charAt(i))) { frac++; i++; }
+            while (i < limit && isAsciiDigit(s.charAt(i))) { frac++; i++; }
             if (frac == 0) return start; // a trailing or fraction-less dot is not a number
         } else if (digits == 0) {
             return start;
@@ -332,37 +440,22 @@ final class SizesCleaner {
     }
 
     /** Read a recognized length unit starting at {@code start}; return the index just past it, or {@code start}. */
-    private static int readUnit(String s, int start) {
-        int n = s.length();
-        if (start < n && s.charAt(start) == '%') return start + 1;
+    private static int readUnit(String s, int start, int limit) {
+        if (start < limit && s.charAt(start) == '%') return start + 1;
         String[] units = {"vmin", "vmax", "rem", "vw", "vh", "em", "px", "ch", "ex"};
         for (String unit : units) {
             int end = start + unit.length();
-            if (end <= n && s.regionMatches(true, start, unit, 0, unit.length())) return end;
+            if (end <= limit && s.regionMatches(true, start, unit, 0, unit.length())) return end;
         }
         return start;
     }
 
     /** A plain scalar length: a non-negative decimal number immediately followed by a recognized unit. */
     private static boolean isScalarLength(String s) {
-        int numEnd = readNumber(s, 0);
+        int numEnd = readNumber(s, 0, s.length());
         if (numEnd == 0) return false;
-        int unitEnd = readUnit(s, numEnd);
+        int unitEnd = readUnit(s, numEnd, s.length());
         return unitEnd != numEnd && unitEnd == s.length();
-    }
-
-    /** Given the index just inside a {@code (} group, return the index of its matching {@code )}, or {@code -1}. */
-    private static int matchingClose(String s, int start) {
-        int depth = 1;
-        for (int i = start; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '(') depth++;
-            else if (c == ')') {
-                depth--;
-                if (depth == 0) return i;
-            }
-        }
-        return -1;
     }
 
     private static boolean isAsciiDigit(char c) {
@@ -421,11 +514,13 @@ final class SizesCleaner {
         return s;
     }
 
-    private static String join(List<String> entries) {
+    private static String join(Set<String> entries) {
         StringBuilder sb = StringUtil.borrowBuilder();
-        for (int i = 0; i < entries.size(); i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(entries.get(i));
+        boolean first = true;
+        for (String entry : entries) {
+            if (!first) sb.append(", ");
+            sb.append(entry);
+            first = false;
         }
         return StringUtil.releaseBuilder(sb);
     }
