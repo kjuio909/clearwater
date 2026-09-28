@@ -195,8 +195,9 @@ public class Cleaner {
         Attributes sourceAttrs = sourceEl.attributes();
         for (Attribute sourceAttr : sourceAttrs) {
             // srcset is structurally allowed like any attribute, but its value holds several candidate URLs which are
-            // validated individually below, so it must not go through the ordinary whole-value protocol test.
-            boolean attrAllowed = SrcsetCleaner.isSrcset(sourceAttr)
+            // validated individually below, so it must not go through the ordinary whole-value protocol test. sizes
+            // is similar: it is parsed entry by entry against the sizes grammar rather than treated as opaque text.
+            boolean attrAllowed = SrcsetCleaner.isSrcset(sourceAttr) || SizesCleaner.isSizes(sourceAttr)
                 ? safelist.isAllowedAttribute(sourceTag, sourceEl, sourceAttr)
                 : safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr);
             if (attrAllowed) { // will keep this attr
@@ -212,6 +213,16 @@ public class Cleaner {
                     }
                     numDiscarded += srcset.droppedCandidates;
                     value = srcset.value;
+                } else if (SizesCleaner.isSizes(sourceAttr)) {
+                    // validate and rewrite each source-size entry; sizes has no URLs and never relaxes the srcset
+                    // protocol checks, it is governed only by its own attribute whitelist and grammar
+                    SizesCleaner.Result sizes = SizesCleaner.clean(value);
+                    if (sizes.removed) { // no acceptable entry: remove the attribute, never leave it empty
+                        numDiscarded += 1 + sizes.droppedEntries;
+                        continue;
+                    }
+                    numDiscarded += sizes.droppedEntries;
+                    value = sizes.value;
                 } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);
                     if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols

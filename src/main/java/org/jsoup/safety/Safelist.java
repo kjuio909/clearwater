@@ -562,8 +562,9 @@ public class Safelist {
     /**
      Test if the supplied attribute is structurally allowed on this tag by the safelist, without applying the
      whole-value protocol check. This is used for attributes whose value is validated piece by piece by the
-     {@link Cleaner} (currently {@code srcset}, whose individual candidate URLs are checked separately); ordinary
-     attributes use {@link #isSafeAttribute(String, Element, Attribute)}.
+     {@link Cleaner} ({@code srcset}, whose individual candidate URLs are checked separately, and {@code sizes},
+     whose individual entries are grammar-checked separately); ordinary attributes use
+     {@link #isSafeAttribute(String, Element, Attribute)}.
      @param tagName tag to consider allowing the attribute in
      @param el element under test
      @param attr attribute under test
