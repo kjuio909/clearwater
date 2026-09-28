@@ -3012,6 +3012,106 @@ public class ElementTest {
         assertSame(a, doc.expectFirst(aQ));
     }
 
+    @Test void cssSelectorClassWithControlCharacter() {
+        // A class token may contain control characters (here decoded from a character reference). The generated
+        // selector must reparse to the identical token, without trim() dropping the control character.
+        Document doc = Jsoup.parse("<div class='z&#1;'>One</div><div class='z&#1;'>Two</div>");
+        Elements divs = doc.select("div");
+        Element one = divs.get(0);
+        Element two = divs.get(1);
+        assertTrue(one.classNames().contains("z\u0001"));
+
+        String oneQ = one.cssSelector();
+        String twoQ = two.cssSelector();
+        assertEquals("html > body > div.z\\1 :nth-child(1)", oneQ);
+        assertEquals("html > body > div.z\\1 :nth-child(2)", twoQ);
+        assertSame(one, doc.expectFirst(oneQ));
+        assertSame(two, doc.expectFirst(twoQ));
+        assertEquals(1, doc.select(oneQ).size());
+        assertEquals(1, doc.select(twoQ).size());
+    }
+
+    @Test void cssSelectorNonReparseableTagName() {
+        // Tag names that are not expressible as a CSS type selector (leading digit, leading hyphen, or a literal '|')
+        // must fall back to a structural position that still uniquely selects the element.
+        Document doc = Document.createShell("");
+        Element a = doc.body().appendElement("1digit");
+        Element b = doc.body().appendElement("1digit");
+        Element c = doc.body().appendElement("-hyphen");
+        Element d = doc.body().appendElement("a|pipe");
+        Element child = b.appendElement("deep");
+
+        assertEquals("html > body > *:nth-child(1)", a.cssSelector());
+        assertEquals("html > body > *:nth-child(2)", b.cssSelector());
+        assertEquals("html > body > *:nth-child(3)", c.cssSelector());
+        assertEquals("html > body > *:nth-child(4)", d.cssSelector());
+        assertEquals("html > body > *:nth-child(2) > deep", child.cssSelector());
+
+        for (Element el : new Element[] {a, b, c, d, child}) {
+            String q = el.cssSelector();
+            assertEquals(q, el.cssSelector()); // deterministic
+            Elements found = doc.select(q);
+            assertEquals(1, found.size());
+            assertSame(el, found.first());
+        }
+
+        // the same pipe tag name can come out of the HTML parser
+        Document parsed = Jsoup.parse("<a|pipe>One</a|pipe><a|pipe>Two</a|pipe>");
+        Elements pipes = parsed.getElementsByTag("a|pipe");
+        assertEquals(2, pipes.size());
+        assertSame(pipes.get(0), parsed.expectFirst(pipes.get(0).cssSelector()));
+        assertSame(pipes.get(1), parsed.expectFirst(pipes.get(1).cssSelector()));
+    }
+
+    @Test void cssSelectorIsStableAndDoesNotMutate() {
+        Document doc = Jsoup.parse(
+            "<article><div id=dupe>a</div><div id=dupe class='c.1 c:2'>b</div>"
+                + "<ul><li>one<ul><li>nested</li></ul></li><li>two</li></ul>"
+                + "<table><tbody><tr><td>x</td><td>y</td></tr></tbody></table>"
+                + "<picture><source srcset='a'><img src='a' alt=''></picture></article>");
+        String html = doc.html();
+
+        for (Element el : doc.select("*")) {
+            if (el instanceof Document) continue; // Document itself has no CSS selector
+            String q = el.cssSelector();
+            assertEquals(q, el.cssSelector()); // verbatim identical across calls
+            Elements found = doc.select(q);
+            assertEquals(1, found.size(), "selector " + q);
+            assertSame(el, found.first());
+        }
+        assertEquals(html, doc.html()); // generation did not write, move, delete, or reorder any node
+    }
+
+    @Test void cssSelectorSurvivesSerializeReparse() {
+        Document doc = Jsoup.parse(
+            "<div id=unique><p>One</p></div>"
+                + "<section><h2>Title</h2><p class=note>A</p><p class=note>B</p></section>"
+                + "<table><thead><tr><th>H</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+                + "<picture><source srcset='s'><img src='i' alt='i'></picture>");
+
+        Map<Element, String> paths = new java.util.LinkedHashMap<>();
+        for (Element el : doc.select("*"))
+            if (!(el instanceof Document)) paths.put(el, el.cssSelector());
+
+        Document reparse = Jsoup.parse(doc.html());
+        paths.forEach((el, q) -> {
+            Elements found = reparse.select(q);
+            assertEquals(1, found.size(), "selector " + q);
+            assertEquals(structuralPath(el), structuralPath(found.first()));
+        });
+    }
+
+    private static String structuralPath(Element el) {
+        StringBuilder sb = new StringBuilder();
+        Node n = el;
+        while (n instanceof Element) {
+            Element e = (Element) n;
+            sb.insert(0, "/" + e.tagName() + "[" + e.elementSiblingIndex() + "]");
+            n = e.parentNode();
+        }
+        return sb.toString();
+    }
+
     @Test void orphanSiblings() {
         Element el = new Element("div");
         assertEquals(0, el.siblingElements().size());

@@ -310,9 +310,12 @@ public class QueryParser implements AutoCloseable {
     }
 
     private Evaluator byClass() {
+        // Do not trim the decoded class: a class name can contain control characters (e.g. decoded from an escaped
+        // code point like \1 ), and String.trim() would strip those along with any whitespace. consumeCssIdentifier
+        // already consumes the single whitespace that terminates a hex escape sequence.
         String className = tq.consumeCssIdentifier();
         Validate.notEmpty(className);
-        return new Evaluator.Class(className.trim());
+        return new Evaluator.Class(className);
     }
 
     private Evaluator byTag() {

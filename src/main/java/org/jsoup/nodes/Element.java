@@ -14,6 +14,7 @@ import org.jsoup.select.Evaluator;
 import org.jsoup.select.NodeFilter;
 import org.jsoup.select.NodeVisitor;
 import org.jsoup.select.Nodes;
+import org.jsoup.select.QueryParser;
 import org.jsoup.select.Selector;
 import org.jspecify.annotations.Nullable;
 
@@ -1103,8 +1104,13 @@ public class Element extends Node implements Iterable<Element> {
     /**
      Get a CSS selector that will uniquely select this element.
      <p>
-     If the element has an ID, returns #id; otherwise returns the parent (if any) CSS selector, followed by
-     {@literal '>'}, followed by a unique selector for the element (tag.class.class:nth-child(n)).
+     If the element has a unique ID, returns {@code #id}; otherwise returns the parent (if any) CSS selector, followed by
+     {@literal '>'}, followed by a unique selector for the element ({@code tag.class.class:nth-child(n)}).
+     </p>
+     <p>
+     When the tag name cannot be expressed as a CSS type selector (e.g. a leading digit or hyphen, or a literal
+     {@code |}), the structural position {@code *:nth-child(n)} is used instead, and {@code :root} for the document's
+     root element, so that the returned selector always parses and matches this element exactly once.
      </p>
 
      @return the CSS Path that can be used to retrieve the element in a selector.
@@ -1130,23 +1136,67 @@ public class Element extends Node implements Iterable<Element> {
     }
 
     private String cssSelectorComponent() {
-        // Escape tagname, and translate HTML namespace ns:tag to CSS namespace syntax ns|tag
-        String tagName = escapeCssIdentifier(tagName()).replace("\\:", "|");
-        StringBuilder selector = StringUtil.borrowBuilder().append(tagName);
+        boolean rootLevel = parent() == null || parent() instanceof Document; // don't add Document to selector, as will always have a html node
+
+        // Build the natural type+classes component. It is only usable if it reparses and matches this element: some
+        // tag names (leading digit/hyphen, or a literal '|') cannot be expressed as a CSS type selector, and an
+        // over-broad component would fail to uniquely locate this element.
+        String component = cssTypeSelector();
         String classes = classNames().stream().map(TokenQueue::escapeCssIdentifier)
                 .collect(StringUtil.joining("."));
         if (!classes.isEmpty())
-            selector.append('.').append(classes);
+            component = component + "." + classes;
 
-        if (parent() == null || parent() instanceof Document) // don't add Document to selector, as will always have a html node
-            return StringUtil.releaseBuilder(selector);
+        final Evaluator evaluator = parseCssOrNull(component);
+        if (evaluator == null || !evaluator.matches(rootLevel ? this : parent(), this))
+            return cssStructuralComponent(rootLevel); // fall back to a universally expressible structural position
 
-        selector.insert(0, " > ");
-        if (parent().select(selector.toString()).size() > 1)
-            selector.append(String.format(
-                ":nth-child(%d)", elementSiblingIndex() + 1));
+        if (rootLevel)
+            return component;
 
-        return StringUtil.releaseBuilder(selector);
+        // Count how many of the parent's direct children this bare component would match; if more than this element,
+        // disambiguate with an nth-child position.
+        boolean unique = true;
+        for (Element sibling : parent().childElementsList()) {
+            if (sibling != this && evaluator.matches(parent(), sibling)) {
+                unique = false;
+                break;
+            }
+        }
+        if (unique)
+            return " > " + component;
+        return String.format(" > %s:nth-child(%d)", component, elementSiblingIndex() + 1);
+    }
+
+    /** Parse a CSS selector, returning null instead of throwing if it is not valid. */
+    private static @Nullable Evaluator parseCssOrNull(String css) {
+        try {
+            return QueryParser.parse(css);
+        } catch (Selector.SelectorParseException e) {
+            return null;
+        }
+    }
+
+    /**
+     Escape this element's tag name as a CSS type selector, translating an HTML namespace {@code ns:tag} to the CSS
+     namespace syntax {@code ns|tag}.
+     */
+    private String cssTypeSelector() {
+        return escapeCssIdentifier(tagName()).replace("\\:", "|");
+    }
+
+    /**
+     A structural component that is expressible for every element and is unique among its element siblings:
+     {@code *:nth-child(n)}. Used as a fallback when the element has no CSS-representable type selector (e.g. a tag
+     name with a leading digit or hyphen, or containing a literal {@code |}). At the root level {@code :root} anchors
+     a document's root element, since {@code :nth-child()} does not match an element whose parent is the document.
+     */
+    private String cssStructuralComponent(boolean rootLevel) {
+        if (rootLevel && ownerDocument() != null && ownerDocument().firstElementChild() == this)
+            return ":root";
+        if (rootLevel)
+            return String.format("*:nth-child(%d)", elementSiblingIndex() + 1);
+        return String.format(" > *:nth-child(%d)", elementSiblingIndex() + 1);
     }
 
     /**
