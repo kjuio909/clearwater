@@ -529,6 +529,25 @@ public interface Connection {
      Set the response progress handler, which will be called periodically as the response body is downloaded. Since
      documents are parsed as they are downloaded, this is also a good proxy for the parse progress.
      <p>The Response object is supplied as the progress context, and may be read from to obtain headers etc.</p>
+     <h4>Progress semantics</h4>
+     <ul>
+     <li>{@code processed} is the number of delivered entity bytes and is reported monotonically; it never moves
+     backwards, repeats at zero, or overflows (it saturates at {@link Integer#MAX_VALUE} for very large bodies).</li>
+     <li>{@code total} is the declared response length and stays fixed while the body is read. When the length is
+     unknown (e.g. a chunked or compressed response), {@code total} is {@code -1} until the entity is confirmed read
+     to its end, at which point it resolves to the delivered length.</li>
+     <li>{@code percent} tracks {@code processed} against {@code total} and reaches {@code 100} exactly once, on the
+     terminal event that confirms the entity was read to its end. While the length is unknown it stays at {@code 0}
+     until that point. An empty entity (or a {@code HEAD} request) still emits this single completion event.</li>
+     <li>Only the response entity actually delivered to the caller is counted. Bodies of intermediate responses
+     encountered following redirects or authentication challenges are discarded and contribute no bytes, no
+     percentage regression, and no extra completion.</li>
+     <li>A non-success status (when {@link #ignoreHttpErrors(boolean) errors are ignored}) and an I/O failure part way
+     through a read may report the bytes already delivered, but never report {@code 100} and never complete
+     successfully; the usual exception semantics are unchanged.</li>
+     <li>The handler only observes progress; it does not affect parsing, the returned content, request headers, or
+     redirect handling. Registering a handler replaces any previously registered handler for that request.</li>
+     </ul>
      @param handler the progress handler
      @return this Connection, for chaining
      @since 1.18.1

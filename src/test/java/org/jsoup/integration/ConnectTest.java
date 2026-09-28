@@ -4,6 +4,7 @@ import org.jsoup.Connection;
 import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.Connection.Method;
+import org.jsoup.Progress;
 import org.jsoup.TextUtil;
 import org.jsoup.UnsupportedMimeTypeException;
 import org.jsoup.helper.DataUtil;
@@ -43,6 +44,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,6 +63,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class ConnectTest {
     private static final int LargeDocFileLen = 280735;
     private static final int LargeDocTextLen = 269535;
+    private static final String HelloBody = "<p>Hello, World!"; // exactly what HelloRoute writes
     private static String echoUrl;
 
     @BeforeAll
@@ -1355,5 +1358,202 @@ public class ConnectTest {
 
         assertEquals("No type", doc.title());
         assertNull(con.response().contentType());
+    }
+
+    // ===== Response progress across response paths =====
+
+    /** records progress events for a single logical request and validates their shape */
+    static final class ProgressTracker implements Progress<Connection.Response> {
+        static final class Event {
+            final int processed, total;
+            final float percent;
+            Event(int processed, int total, float percent) {
+                this.processed = processed;
+                this.total = total;
+                this.percent = percent;
+            }
+        }
+
+        final List<Event> events = new ArrayList<>();
+        Connection.Response context;
+
+        @Override public void onProgress(int processed, int total, float percent, Connection.Response response) {
+            if (!events.isEmpty()) {
+                Event prev = events.get(events.size() - 1);
+                assertTrue(processed >= prev.processed, "processed regressed: " + prev.processed + " -> " + processed);
+                assertTrue(percent >= prev.percent, "percent regressed: " + prev.percent + " -> " + percent);
+            }
+            assertTrue(percent >= 0f && percent <= 100f);
+            events.add(new Event(processed, total, percent));
+            context = response;
+        }
+
+        int completions() {
+            return (int) events.stream().filter(e -> e.percent == 100f).count();
+        }
+
+        void assertCompletedOnce(int expectedProcessed) {
+            assertEquals(1, completions(), "exactly one completion event, events=" + events);
+            Event last = events.get(events.size() - 1);
+            assertEquals(100f, last.percent);
+            assertEquals(expectedProcessed, last.processed);
+            assertEquals(expectedProcessed, last.total);
+        }
+    }
+
+    @Test void progressOnRedirectCountsOnlyFinalResponse() throws IOException {
+        String finalUrl = origin().hello.url();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection con = Jsoup.connect(origin().redirect.url())
+            .data(RedirectRoute.LocationParam, finalUrl)
+            .data(RedirectRoute.BodyParam, "1") // redirect carries an unconsumed ~8K body
+            .onResponseProgress(tracker);
+
+        Document doc = con.get();
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+        assertEquals(finalUrl, con.response().url().toExternalForm());
+
+        assertTrue(tracker.events.size() >= 1, "the final response reports progress");
+        for (ProgressTracker.Event e : tracker.events)
+            assertTrue(e.total <= HelloBody.length(), "no bytes from the discarded redirect body are counted");
+        tracker.assertCompletedOnce(HelloBody.length());
+    }
+
+    @ParameterizedTest @MethodSource("echoUrls")
+    void progressOnAuthChallengeCountsOnlyFinalResponse(String url) throws IOException {
+        String password = TestAuth.newServerPassword();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection.Response res = Jsoup.connect(url)
+            .header(TestAuth.WantsServerAuthentication, "1")
+            .auth(ctx -> ctx.credentials(TestAuth.ServerUser, password))
+            .onResponseProgress(tracker)
+            .execute();
+        byte[] body = res.bodyAsBytes(); // fully read the delivered (final, authenticated) entity
+
+        // only the final response reports progress, closing exactly once on its own delivered body length
+        tracker.assertCompletedOnce(body.length);
+        assertEquals(200, res.statusCode());
+    }
+
+    @Test void progressOnGzipReportsDecodedBytesAndCompletesOnlyAtEnd() throws IOException {
+        String url = origin().file.url("/htmltests/large.html.gz"); // 280K decoded, ~10K compressed
+        ProgressTracker tracker = new ProgressTracker();
+
+        Document doc = Jsoup.connect(url).onResponseProgress(tracker).get();
+
+        assertEquals(LargeDocTextLen, doc.text().length());
+        // progress counts decoded entity bytes; the compressed transport length is a different unit, so the total
+        // stays unknown and percent stays zero until the genuine end
+        for (int i = 0; i < tracker.events.size() - 1; i++) {
+            ProgressTracker.Event e = tracker.events.get(i);
+            assertEquals(-1, e.total, "compressed responses report an unknown length until complete");
+            assertEquals(0f, e.percent, "no premature 100% against the compressed length");
+        }
+        tracker.assertCompletedOnce(LargeDocFileLen);
+    }
+
+    @Test void progressOnHeadRequestStillCompletes() throws IOException {
+        // a HEAD delivers no entity, but the caller must still get a single determinable completion
+        ProgressTracker tracker = new ProgressTracker();
+        Connection.Response res = Jsoup.connect(origin().file.url("/htmltests/large.html"))
+            .method(Method.HEAD)
+            .onResponseProgress(tracker)
+            .execute();
+
+        assertEquals(1, tracker.events.size());
+        tracker.assertCompletedOnce(0);
+        assertEquals(0, res.bodyAsBytes().length);
+    }
+
+    @Test void progressOnErrorStatusReportsDeliveryButNeverCompletion() throws IOException {
+        ProgressTracker tracker = new ProgressTracker();
+        Connection.Response res = Jsoup.connect(echoUrl)
+            .header(EchoRoute.CodeParam, "500")
+            .ignoreHttpErrors(true)
+            .onResponseProgress(tracker)
+            .execute();
+
+        byte[] body = res.bodyAsBytes(); // an error status still delivers a body
+        assertEquals(500, res.statusCode());
+        assertTrue(body.length > 0);
+        assertEquals(0, tracker.completions(), "an error response must never report completion");
+        ProgressTracker.Event last = tracker.events.get(tracker.events.size() - 1);
+        assertTrue(last.percent < 100f);
+        assertEquals(body.length, last.processed, "actually delivered bytes may be reported");
+    }
+
+    @Test void noOpProgressCallbackDoesNotAffectResult() throws IOException {
+        Document doc = Jsoup.connect(origin().hello.url())
+            .onResponseProgress((processed, total, percent, response) -> { /* deliberately empty */ })
+            .get();
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+    }
+
+    @Test void progressCompletesOnceWhenResponseBodyIsReadMoreThanOnce() throws IOException {
+        ProgressTracker tracker = new ProgressTracker();
+        Connection.Response res = Jsoup.connect(origin().hello.url())
+            .onResponseProgress(tracker)
+            .execute();
+
+        String first = res.body();
+        String second = res.body(); // body() re-reads the buffered bytes; must not emit a second completion
+        assertEquals(first, second);
+        assertEquals(HelloBody, first);
+        tracker.assertCompletedOnce(HelloBody.length());
+    }
+
+    @Test void progressCallbackReplacementOnlyDeliversToLatest() throws IOException {
+        ProgressTracker first = new ProgressTracker();
+        ProgressTracker second = new ProgressTracker();
+
+        Document doc = Jsoup.connect(origin().hello.url())
+            .onResponseProgress(first)
+            .onResponseProgress(second) // a later registration replaces the earlier one before execution
+            .get();
+
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+        assertEquals(0, first.events.size(), "the replaced callback must not observe anything");
+        second.assertCompletedOnce(HelloBody.length());
+    }
+
+    @Test void progressDoesNotLeakAcrossRequestsOnSameConnection() throws IOException {
+        Connection con = Jsoup.connect(origin().hello.url());
+
+        ProgressTracker first = new ProgressTracker();
+        con.onResponseProgress(first).get();
+        first.assertCompletedOnce(HelloBody.length());
+
+        // reuse the same connection object for a second, different logical request: counters start afresh
+        ProgressTracker second = new ProgressTracker();
+        con.url(origin().file.url("/htmltests/large.html")).onResponseProgress(second).get();
+        second.assertCompletedOnce(LargeDocFileLen);
+
+        // the first request's tracker was not touched by the second request
+        assertEquals(1, first.completions());
+        assertEquals(HelloBody.length(), first.events.get(first.events.size() - 1).processed);
+    }
+
+    @Test void aFailureDoesNotPolluteProgressOnASubsequentRequest() throws IOException {
+        Connection session = Jsoup.newSession();
+
+        ProgressTracker failing = new ProgressTracker();
+        try {
+            session.newRequest(echoUrl)
+                .header(EchoRoute.CodeParam, "500")
+                .ignoreHttpErrors(false)
+                .onResponseProgress(failing)
+                .execute();
+            fail("expected an HttpStatusException");
+        } catch (HttpStatusException e) {
+            assertEquals(500, e.getStatusCode());
+        }
+        assertEquals(0, failing.completions());
+
+        ProgressTracker ok = new ProgressTracker();
+        Document doc = session.newRequest(origin().hello.url()).onResponseProgress(ok).get();
+        assertEquals("Hello, World!", doc.expectFirst("p").text());
+        ok.assertCompletedOnce(HelloBody.length());
     }
 }

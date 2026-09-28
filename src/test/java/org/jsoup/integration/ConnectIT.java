@@ -169,6 +169,27 @@ public class ConnectIT {
 
     @Test
     @Execution(CONCURRENT)
+    void progressOnMidReadFailureReportsPartialButNeverCompletes() {
+        ConnectTest.ProgressTracker tracker = new ConnectTest.ProgressTracker();
+
+        // some body arrives (the intro), then the read stalls past the timeout and fails mid-entity.
+        // the two executors surface this differently (SocketTimeoutException vs an IOException wrapping the
+        // JDK HttpTimeoutException); both are IO failures and neither may be reported as completion
+        assertThrows(IOException.class, () -> slowRiderTimeout()
+            .data(SlowRider.IntroSizeParam, "8000")
+            .timeout(TimeoutMillis)
+            .onResponseProgress(tracker)
+            .get());
+
+        assertFalse(tracker.events.isEmpty(), "the bytes read before the failure may be reported");
+        assertEquals(0, tracker.completions(), "a mid-read failure must never report completion");
+        ConnectTest.ProgressTracker.Event last = tracker.events.get(tracker.events.size() - 1);
+        assertTrue(last.processed > 0, "partial delivery is reported");
+        assertTrue(last.percent < 100f);
+    }
+
+    @Test
+    @Execution(CONCURRENT)
     public void infiniteReadSupported() throws IOException {
         Document doc = slowRiderCompletes()
             .timeout(0)

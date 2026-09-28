@@ -8,6 +8,7 @@ public final class RedirectRoute {
     public static final String LocationParam = "loc";
     public static final String CodeParam = "code";
     public static final String SetCookiesParam = "setCookies";
+    public static final String BodyParam = "body";
     private static final int DefaultCode = 302;
 
     private RedirectRoute() {
@@ -30,6 +31,14 @@ public final class RedirectRoute {
             response.addCookie(new DefaultCookie("token", "asdfg123"));
             response.addCookie(new DefaultCookie("uid", "foobar"));
             response.addCookie(new DefaultCookie("uid", "jhy")); // dupe, should use latter
+        }
+
+        if (request.parameter(BodyParam) != null) {
+            // redirect responses can carry an unconsumed body; it must never leak into the final response's progress
+            StringBuilder body = new StringBuilder();
+            while (body.length() < 8192)
+                body.append("<p>This redirect body should be discarded, not counted.</p>\n");
+            response.write(body.toString());
         }
 
         response.setHeader("Location", location);
