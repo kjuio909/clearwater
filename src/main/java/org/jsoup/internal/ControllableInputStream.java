@@ -30,8 +30,13 @@ public class ControllableInputStream extends FilterInputStream {
 
     // if we are tracking progress, will have the expected content length and progress callback state
     private @Nullable ProgressState<?> progress;
-    private int contentLength = -1;         // expected content length for progress; -1 == unknown
-    private int readPos = 0;                // amount read; can be reset()
+    private int expectedLength = -1;      // declared content length for progress; -1 == unknown, never mutated on completion
+    private int readPos = 0;              // logical amount read; can be reset() by mark/reset
+    private int reportedPos = 0;          // high-water mark ever emitted to the progress callback; monotonic
+    private boolean progressComplete = false; // latches the single terminal progress callback
+    private boolean reportCompletion = true;   // false for non-success responses: partial progress is allowed, but never 100%
+
+    private final byte[] singleByte = new byte[1]; // routes the single byte read() through the controlled read(byte[], ...)
 
     private ControllableInputStream(SimpleBufferedInput in, int maxSize) {
         super(in);
@@ -70,12 +75,45 @@ public class ControllableInputStream extends FilterInputStream {
     }
 
     @Override
+    public int read() throws IOException {
+        // route the single byte read through the controlled array read, so that caps, timeouts, interrupts, and
+        // progress are applied consistently
+        int read = read(singleByte, 0, 1);
+        return read == -1 ? -1 : singleByte[0] & 0xff;
+    }
+
+    @Override
+    public long skip(long n) throws IOException {
+        // route skips through the controlled read, so that skipped bytes are still capped and counted in progress
+        if (n <= 0) return 0;
+        long skipped = 0;
+        byte[] skipBuf = SimpleBufferedInput.BufferPool.borrow();
+        try {
+            while (skipped < n) {
+                int size = (int) Math.min(n - skipped, skipBuf.length);
+                int read = read(skipBuf, 0, size);
+                if (read == -1) break;
+                skipped += read;
+                if (read < size) break;
+            }
+        } finally {
+            SimpleBufferedInput.BufferPool.release(skipBuf);
+        }
+        return skipped;
+    }
+
+    @Override
     public int read(byte[] b, int off, int len) throws IOException {
-        if (readPos == 0) emitProgress(); // emits a progress
+        if (readPos == 0 && reportedPos == 0) emitProgress(false); // emits the initial, zero-processed event
 
         boolean capped = maxSize != 0;
-        if (interrupted || capped && remaining <= 0)
+        if (interrupted || capped && remaining <= 0) {
+            // cap hit or interrupt is normally a synthetic EOF, not a confirmed end of entity. But if the buffer
+            // already knows the underlying entity reached EOF, this is a genuine completion and must be reported once.
+            if (!interrupted && capped && remaining <= 0 && progress != null && !progressComplete && buff.baseReadFully())
+                emitProgress(true);
             return -1;
+        }
         if (Thread.currentThread().isInterrupted()) {
             // interrupted latches, because parse() may call twice
             interrupted = true;
@@ -92,15 +130,15 @@ public class ControllableInputStream extends FilterInputStream {
 
             try {
                 final int read = super.read(b, off, len);
-                if (read == -1) { // completed
-                    contentLength = readPos;
+                if (read == -1) { // the underlying entity was read to its end: emit the single completion event
+                    emitProgress(true);
                 } else {
                     if (capped && read > 0) {
                         remaining -= read; // track bytes returned to the caller
                     }
-                    readPos += read;
+                    readPos = saturatingAdd(readPos, read);
+                    emitProgress(false);
                 }
-                emitProgress();
                 return read;
             } catch (SocketTimeoutException e) {
                 if (expired() || timeout == 0)
@@ -162,7 +200,7 @@ public class ControllableInputStream extends FilterInputStream {
             remaining = 0;
             buff.capRemaining(Integer.MAX_VALUE);
         }
-        readPos = markPos; // readPos is used for progress emits
+        readPos = markPos; // readPos tracks the logical read position for cap and progress emits
         markPos = -1;
     }
 
@@ -205,7 +243,14 @@ public class ControllableInputStream extends FilterInputStream {
     }
 
     @Override public void close() throws IOException {
-        if (allowClose) super.close();
+        if (allowClose) {
+            // If the whole entity had already been pulled from the underlying stream but no terminal read happened
+            // (e.g. readFully stops as soon as it exhausts the size cap), still deliver the single completion event.
+            // A partial read that is closed early has baseReadFully() false, so no completion is faked.
+            if (progress != null && buff.baseReadFully())
+                emitProgress(true);
+            super.close();
+        }
     }
 
     public ControllableInputStream timeout(long startTimeNanos, long timeoutMillis) {
@@ -214,21 +259,89 @@ public class ControllableInputStream extends FilterInputStream {
         return this;
     }
 
-    private void emitProgress() {
+    /**
+     Report progress using the logical read position, clamped against the high-water mark so that re-reads after a
+     mark/reset (used during charset detection) never emit a smaller {@code processed} or lower {@code percent} than
+     a previous event. The terminal event is emitted exactly once:
+     <ul>
+       <li>known length: the high-water mark reaches the declared length (or the stream confirms EOF at it);</li>
+       <li>unknown length: percent stays at 0 until the underlying stream confirms EOF, when a single 100% event
+       is emitted with {@code total} set to the final byte count;</li>
+     </ul>
+     A synthetic EOF (max size cap hit, or thread interrupt) does <b>not</b> raise completion, because the entity
+     may continue beyond the truncated read.
+     @param complete true only when the underlying entity is confirmed read to its end
+     */
+    private void emitProgress(boolean complete) {
         ProgressState<?> progress = this.progress;
         if (progress == null) return;
-        // calculate percent complete if contentLength > 0 (and cap to 100.0 if totalRead > contentLength):
-        float percent = contentLength > 0 ? Math.min(100f, readPos * 100f / contentLength) : 0;
-        progress.emit(readPos, contentLength, percent);
-        if (percent == 100.0f) this.progress = null; // detach once we reach 100%, so that any subsequent buffer hits don't report 100 again
+
+        if (readPos > reportedPos) reportedPos = readPos; // clamp to the high-water mark; reset() must not regress events
+        int processed = reportedPos;
+        int total = expectedLength;
+        float percent;
+
+        // A confirmed EOF must not be reported as 100% when:
+        //  - this is a non-success HTTP response (an error drain is not a successful delivery), or
+        //  - a length was declared and fewer bytes arrived (premature EOF / mid-entity I/O failure).
+        // In those cases report the bytes actually read once, but never signal completion, then detach.
+        boolean prematureEof = complete && expectedLength > 0 && processed < expectedLength;
+        if (complete && (!reportCompletion || prematureEof)) {
+            percent = expectedLength > 0 ? Math.min(100f, processed * 100f / expectedLength) : 0f;
+            if (percent >= 100f) percent = 99.99999f;
+            progress.emit(processed, total, percent);
+            this.progress = null;
+            return;
+        }
+
+        if (complete) {
+            if (expectedLength < 0) total = processed; // unknown length: only now reveal the measured total
+            percent = 100.0f;
+            progressComplete = true;
+        } else if (expectedLength > 0) {
+            percent = Math.min(100f, processed * 100f / expectedLength);
+        } else {
+            percent = 0f;
+        }
+
+        // only the confirmed-EOF event may report 100%; otherwise an exact-length buffer fill followed by the EOF
+        // read would look like two completion callbacks
+        if (!complete && percent >= 100f) percent = 99.99999f;
+
+        progress.emit(processed, total, percent);
+        if (progressComplete)
+            this.progress = null; // detach after the single terminal event, so later reads can't report completion again
     }
 
-    public <ProgressContext> ControllableInputStream onProgress(int contentLength, Progress<ProgressContext> callback, ProgressContext context) {
+    private static int saturatingAdd(int value, int add) {
+        long sum = (long) value + add;
+        return sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+    }
+
+    /**
+     Attach a progress callback to this stream.
+     @param contentLength the declared entity length, or -1 if unknown
+     @param successful false for a non-success HTTP status response: partial progress may then be reported as the
+     error body is consumed, but a terminal 100% completion event is never emitted
+     */
+    public <ProgressContext> ControllableInputStream onProgress(int contentLength, Progress<ProgressContext> callback, ProgressContext context, boolean successful) {
         Validate.notNull(callback);
         Validate.notNull(context);
-        this.contentLength = contentLength;
+        this.expectedLength = contentLength;
+        this.readPos = 0;
+        this.reportedPos = 0;
+        this.progressComplete = false;
+        this.reportCompletion = successful;
         this.progress = new ProgressState<>(callback, context);
         return this;
+    }
+
+    /**
+     Attach a progress callback to this stream, treating the entity as a successful response.
+     @since 1.18.1
+     */
+    public <ProgressContext> ControllableInputStream onProgress(int contentLength, Progress<ProgressContext> callback, ProgressContext context) {
+        return onProgress(contentLength, callback, context, true);
     }
 
     private boolean expired() {

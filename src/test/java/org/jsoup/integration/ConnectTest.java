@@ -4,6 +4,7 @@ import org.jsoup.Connection;
 import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.Connection.Method;
+import org.jsoup.Progress;
 import org.jsoup.TextUtil;
 import org.jsoup.UnsupportedMimeTypeException;
 import org.jsoup.helper.DataUtil;
@@ -1345,6 +1346,217 @@ public class ConnectTest {
 
         // check the document works
         assertEquals(LargeDocTextLen, document.text().length());
+    }
+
+    /** Records progress events for assertion across the various response paths. */
+    static final class ProgressTracker {
+        final List<int[]> events = new java.util.ArrayList<>(); // [processed, total]
+        final List<Float> percents = new java.util.ArrayList<>();
+        final List<Connection.Response> contexts = new java.util.ArrayList<>();
+        int completions = 0;
+
+        Progress<Connection.Response> callback() {
+            return (processed, total, percent, response) -> {
+                events.add(new int[]{processed, total});
+                percents.add(percent);
+                contexts.add(response);
+                if (percent == 100.0f) completions++;
+            };
+        }
+
+        void assertMonotonic() {
+            int lastProcessed = -1;
+            float lastPercent = -1f;
+            for (int i = 0; i < events.size(); i++) {
+                int processed = events.get(i)[0];
+                float percent = percents.get(i);
+                assertTrue(processed >= lastProcessed, "processed regressed: " + events);
+                assertTrue(percent >= lastPercent - 0.0001f, "percent regressed: " + percents);
+                lastProcessed = processed;
+                lastPercent = percent;
+            }
+        }
+
+        void assertNoCompletion() {
+            assertEquals(0, completions, "must not report completion");
+            for (Float percent : percents) assertTrue(percent < 100f, "must not report 100%");
+        }
+    }
+
+    @Test
+    void progressOnHeadEmptyBodyCompletes() throws IOException {
+        String url = origin().hello.url();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection.Response res = Jsoup.connect(url)
+            .method(Method.HEAD)
+            .onResponseProgress(tracker.callback())
+            .execute();
+
+        assertEquals(200, res.statusCode());
+        assertEquals(1, tracker.completions, "empty entity still yields one completion");
+        int[] terminal = tracker.events.get(tracker.events.size() - 1);
+        assertEquals(0, terminal[0]);
+        assertEquals(0, terminal[1]);
+        assertEquals(100f, tracker.percents.get(tracker.percents.size() - 1), 0f);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"301", "302", "303", "307", "308"})
+    void progressOnlyCountsFinalResponseAfterRedirect(String code) throws IOException {
+        String finalUrl = origin().hello.url();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Document doc = Jsoup.connect(origin().redirect.url())
+            .data(RedirectRoute.CodeParam, code)
+            .data(RedirectRoute.LocationParam, finalUrl)
+            .onResponseProgress(tracker.callback())
+            .get();
+
+        assertEquals("Hello, World!", doc.selectFirst("p").text());
+        tracker.assertMonotonic();
+        assertEquals(1, tracker.completions, "exactly one completion, from the final entity");
+        // every event must describe the final response, never an intermediate one
+        for (Connection.Response ctx : tracker.contexts) {
+            assertEquals(finalUrl, ctx.url().toExternalForm());
+            assertEquals(200, ctx.statusCode());
+        }
+        int[] terminal = tracker.events.get(tracker.events.size() - 1);
+        assertTrue(terminal[0] > 0, "final hello entity has bytes");
+        assertEquals(terminal[0], terminal[1]);
+    }
+
+    @ParameterizedTest @MethodSource("echoUrls")
+    void progressOnlyCountsFinalResponseAfterAuth(String url) throws IOException {
+        String password = TestAuth.newServerPassword();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection.Response res = Jsoup.connect(url)
+            .header(TestAuth.WantsServerAuthentication, "1")
+            .auth(ctx -> ctx.credentials(TestAuth.ServerUser, password))
+            .onResponseProgress(tracker.callback())
+            .execute();
+        res.parse(); // consume the entity
+
+        assertEquals(200, res.statusCode());
+        tracker.assertMonotonic();
+        assertEquals(1, tracker.completions, "auth retries must not create a second completion");
+    }
+
+    @Test
+    void progressOnErrorNeverCompletes() throws IOException {
+        String url = echoUrl;
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection.Response res = Jsoup.connect(url)
+            .header(EchoRoute.CodeParam, "500")
+            .ignoreHttpErrors(true)
+            .onResponseProgress(tracker.callback())
+            .execute();
+        assertEquals(500, res.statusCode());
+        res.body(); // consume the error entity fully
+
+        assertTrue(tracker.events.size() > 0, "partial reads of the error body are reported");
+        tracker.assertMonotonic();
+        tracker.assertNoCompletion();
+    }
+
+    @Test
+    void progressOnThrownErrorReportsNoEvents() {
+        String url = echoUrl;
+        ProgressTracker tracker = new ProgressTracker();
+
+        HttpStatusException ex = assertThrows(HttpStatusException.class, () -> Jsoup.connect(url)
+            .header(EchoRoute.CodeParam, "500")
+            .onResponseProgress(tracker.callback())
+            .get());
+        assertEquals(500, ex.getStatusCode());
+        assertEquals(0, tracker.completions, "a thrown error response is never a completion");
+    }
+
+    @Test
+    void progressMidEntityIoFailureNeverCompletes() throws IOException {
+        // server declares twice the bytes it actually writes and closes the connection: an entity read failure
+        ProgressTracker tracker = new ProgressTracker();
+        try {
+            Connection.Response res = Jsoup.connect(origin().interrupted.url())
+                .data(InterruptedRoute.Magnitude, InterruptedRoute.Larger)
+                .timeout(2000)
+                .onResponseProgress(tracker.callback())
+                .execute();
+            res.parse();
+        } catch (IOException ignored) {
+            // either client may surface the malformed framing during execute() or while consuming the body
+        }
+        tracker.assertMonotonic();
+        tracker.assertNoCompletion();
+    }
+
+    @Test
+    void progressRestartsAcrossReusedConnectionRequests() throws IOException {
+        String firstUrl = origin().file.url("/htmltests/medium.html");
+        String secondUrl = origin().hello.url();
+
+        ProgressTracker first = new ProgressTracker();
+        Connection session = Jsoup.newSession().onResponseProgress(first.callback());
+        session.newRequest(firstUrl).get();
+        assertEquals(1, first.completions);
+        assertTrue(first.events.get(0)[0] == 0, "first request starts at zero");
+
+        ProgressTracker second = new ProgressTracker();
+        Connection secondCon = session.newRequest(secondUrl).onResponseProgress(second.callback());
+        secondCon.get();
+
+        assertEquals(1, second.completions, "the second request has its own completion");
+        assertEquals(0, second.events.get(0)[0], "counters restart; no leak of the previous response");
+        assertEquals(secondUrl, second.contexts.get(0).url().toExternalForm());
+        int[] terminal = second.events.get(second.events.size() - 1);
+        assertEquals(terminal[0], terminal[1]);
+    }
+
+    @Test
+    void progressSingleCompletionWhenBodyReadRepeatedly() throws IOException {
+        String url = origin().hello.url();
+        ProgressTracker tracker = new ProgressTracker();
+
+        Connection.Response res = Jsoup.connect(url)
+            .onResponseProgress(tracker.callback())
+            .execute();
+        res.readFully(); // first full consumption drives progress
+        res.body();     // repeated reads of the buffered bytes must not emit another completion
+        res.bodyAsBytes();
+
+        assertEquals(1, tracker.completions);
+        tracker.assertMonotonic();
+    }
+
+    @Test
+    void noopProgressCallbackDoesNotAffectFetch() throws IOException {
+        String url = origin().hello.url();
+        Document doc = Jsoup.connect(url)
+            .onResponseProgress((processed, total, percent, response) -> { /* empty callback */ })
+            .get();
+        assertEquals("Hello, World!", doc.selectFirst("p").text());
+    }
+
+    @Test
+    void progressOnGzipBodyCountsDecodedBytes() throws IOException {
+        // gzip.html.gz is 85 compressed bytes and 63 decompressed; the entity the caller gets is the decoded one
+        String url = origin().file.url("/htmltests/gzip.html.gz");
+        ProgressTracker tracker = new ProgressTracker();
+
+        Document doc = Jsoup.connect(url).onResponseProgress(tracker.callback()).get();
+        assertNotNull(doc.selectFirst("p"));
+        tracker.assertMonotonic();
+        assertEquals(1, tracker.completions, "decoded entity completes exactly once");
+        for (int i = 0; i < tracker.events.size() - 1; i++) {
+            assertEquals(-1, tracker.events.get(i)[1], "compressed length is not reported as the total");
+            assertEquals(0f, tracker.percents.get(i), 0f);
+        }
+        int[] terminal = tracker.events.get(tracker.events.size() - 1);
+        assertEquals(63, terminal[0], "processed counts the decoded 63 bytes");
+        assertEquals(63, terminal[1], "terminal total is the measured decoded length");
+        assertEquals(100f, tracker.percents.get(tracker.percents.size() - 1), 0f);
     }
 
     @Test public void handlesMissingContentType() throws IOException {

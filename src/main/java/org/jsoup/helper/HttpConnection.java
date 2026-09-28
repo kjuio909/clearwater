@@ -986,21 +986,32 @@ public class HttpConnection implements Connection {
                 }
 
                 res.charset = DataUtil.getCharsetFromContentType(res.contentType); // may be null, readInputStream deals with it
+                // only a 2xx/3xx response is a successful delivery; an error body may report partial progress but
+                // must never report completion
+                boolean successful = res.statusCode >= 200 && res.statusCode < 400;
                 if (res.contentLength != 0 && req.method() != HEAD) { // -1 means unknown, chunked. sun throws an IO exception on 500 response with no content when trying to read body
                     InputStream stream = executor.responseBody();
-                    if (res.hasHeaderWithValue(CONTENT_ENCODING, "gzip"))
+                    boolean gzip = res.hasHeaderWithValue(CONTENT_ENCODING, "gzip");
+                    boolean deflate = res.hasHeaderWithValue(CONTENT_ENCODING, "deflate");
+                    if (gzip)
                         stream = new GZIPInputStream(stream);
-                    else if (res.hasHeaderWithValue(CONTENT_ENCODING, "deflate"))
+                    else if (deflate)
                         stream = new InflaterInputStream(stream, new Inflater(true));
-                    
+
                     res.bodyStream = ControllableInputStream.wrap(
                         stream, DefaultBufferSize, req.maxBodySize())
                         .timeout(startTime, req.timeout());
 
-                    if (req.responseProgress != null) // set response progress listener
-                        res.bodyStream.onProgress(res.contentLength, req.responseProgress, res);
+                    if (req.responseProgress != null) // set response progress listener on the final entity only
+                        // a transport Content-Encoding delivers decompressed bytes, so the declared Content-Length is
+                        // in different units from the bytes the callback sees; report the total as unknown there
+                        res.bodyStream.onProgress(gzip || deflate ? -1 : res.contentLength, req.responseProgress, res, successful);
                 } else {
                     res.byteData = DataUtil.emptyByteBuffer();
+                    // no entity will be read (empty body or HEAD), so there is no stream to emit from; give the
+                    // listener its single, determinable completion event ourselves
+                    if (successful && req.responseProgress != null)
+                        req.responseProgress.onProgress(0, 0, 100f, res);
                 }
             } catch (IOException e) {
                 if (res != null) res.safeClose(); // will be non-null if got to conn
