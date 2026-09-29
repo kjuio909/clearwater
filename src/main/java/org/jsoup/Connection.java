@@ -532,21 +532,28 @@ public interface Connection {
      <h4>Progress semantics</h4>
      <ul>
      <li>{@code processed} is the number of delivered entity bytes and is reported monotonically; it never moves
-     backwards, repeats at zero, or overflows (it saturates at {@link Integer#MAX_VALUE} for very large bodies).</li>
+     backwards, repeats at zero, exceeds the declared length, or overflows (it saturates at {@link Integer#MAX_VALUE}
+    for very large bodies).</li>
      <li>{@code total} is the declared response length and stays fixed while the body is read. When the length is
-     unknown (e.g. a chunked or compressed response), {@code total} is {@code -1} until the entity is confirmed read
-     to its end, at which point it resolves to the delivered length.</li>
+     unknown (e.g. a chunked or compressed response), {@code total} is {@code -1} on <em>every</em> event, including
+     the terminal completion; the delivered byte count is then carried in {@code processed}.</li>
      <li>{@code percent} tracks {@code processed} against {@code total} and reaches {@code 100} exactly once, on the
      terminal event that confirms the entity was read to its end. While the length is unknown it stays at {@code 0}
-     until that point. An empty entity (or a {@code HEAD} request) still emits this single completion event.</li>
+     until that point. A declared length of zero emits one {@code (0, 0, 100)} event, an unknown-length empty entity
+     emits one {@code (0, -1, 100)} event, and a {@code HEAD} request likewise emits its single completion.</li>
+     <li>Completion is reported only when the delivered entity exactly matches the declared length. If the entity is
+     shorter or longer than declared, no {@code 100%} is reported and the request is not treated as a successful
+     completion; the bytes actually delivered are still reported (clamped to the declared length), and the existing
+     exception and read-data semantics are unchanged.</li>
      <li>Only the response entity actually delivered to the caller is counted. Bodies of intermediate responses
      encountered following redirects or authentication challenges are discarded and contribute no bytes, no
      percentage regression, and no extra completion.</li>
      <li>A non-success status (when {@link #ignoreHttpErrors(boolean) errors are ignored}) and an I/O failure part way
      through a read may report the bytes already delivered, but never report {@code 100} and never complete
-     successfully; the usual exception semantics are unchanged.</li>
+     successfully; the usual exception semantics are unchanged, and the connection can still issue another request.</li>
      <li>The handler only observes progress; it does not affect parsing, the returned content, request headers, or
-     redirect handling. Registering a handler replaces any previously registered handler for that request.</li>
+     redirect handling. Events within one request are delivered in read order. Registering a handler replaces any
+     previously registered handler for that request.</li>
      </ul>
      @param handler the progress handler
      @return this Connection, for chaining
@@ -562,13 +569,14 @@ public interface Connection {
      * {@link #onResponseProgress(Progress)}, and is the primary entry point for observing download progress.
      <p>The {@link Response} object is supplied as the progress context, and may be read to obtain headers etc.</p>
      <p>The handler is a purely side-channel observer: it must not affect the fetch. In particular, if the handler
-     throws a {@link RuntimeException} on any progress event, that exception is swallowed and never propagated to
-     the caller; the current request still consumes the response and returns the same document (or raises the same
-     request exception) it would have without a handler. After such a failure the handler receives no further events
-     for that request, but the network read, parsing, and resource close all still run to completion, and no
-     completion event is fabricated. Progress state (counters, percentage, failure flag) is per request: reusing a
-     connection for another request rebuilds it independently, so a handler that threw, an empty response, or a
-     completed response on one request never affects the next.</p>
+     throws a {@link RuntimeException} on a progress event, that exception is swallowed for that notification only
+     and never propagated to the caller; the network read, resource close, parsing, and every subsequent
+     notification (including the terminal completion) still proceed, so the request returns the same document (or
+     raises the same request exception) it would have without a handler. Replacing the handler, registering an empty
+     one, or passing {@code null} to cancel ensures the previously registered handler immediately stops receiving
+     events. Progress state (counters and completion) is per request and per handler: reusing a connection for
+     another request, or swapping handlers within one, rebuilds it independently, so a handler that threw, saw an
+     empty response, or completed on one request never affects the next.</p>
      @param handler the progress handler, or {@code null} to remove any previously registered handler
      @return this Connection, for chaining
      @since 1.23.3

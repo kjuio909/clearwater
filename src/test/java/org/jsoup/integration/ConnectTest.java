@@ -1393,11 +1393,15 @@ public class ConnectTest {
         }
 
         void assertCompletedOnce(int expectedProcessed) {
+            assertCompletedOnce(expectedProcessed, expectedProcessed);
+        }
+
+        void assertCompletedOnce(int expectedProcessed, int expectedTotal) {
             assertEquals(1, completions(), "exactly one completion event, events=" + events);
             Event last = events.get(events.size() - 1);
             assertEquals(100f, last.percent);
             assertEquals(expectedProcessed, last.processed);
-            assertEquals(expectedProcessed, last.total);
+            assertEquals(expectedTotal, last.total);
         }
     }
 
@@ -1445,13 +1449,13 @@ public class ConnectTest {
 
         assertEquals(LargeDocTextLen, doc.text().length());
         // progress counts decoded entity bytes; the compressed transport length is a different unit, so the total
-        // stays unknown and percent stays zero until the genuine end
+        // stays unknown and percent stays zero until the genuine end; total remains -1 even at completion
         for (int i = 0; i < tracker.events.size() - 1; i++) {
             ProgressTracker.Event e = tracker.events.get(i);
             assertEquals(-1, e.total, "compressed responses report an unknown length until complete");
             assertEquals(0f, e.percent, "no premature 100% against the compressed length");
         }
-        tracker.assertCompletedOnce(LargeDocFileLen);
+        tracker.assertCompletedOnce(LargeDocFileLen, -1);
     }
 
     @Test void progressOnHeadRequestStillCompletes() throws IOException {
@@ -1585,23 +1589,26 @@ public class ConnectTest {
         assertEquals(LargeDocTextLen, doc.text().length(), "the document is identical to the no-handler result");
     }
 
-    @Test void onProgressThrowingHandlerStopsReceivingEventsWithinRequest() throws IOException {
+    @Test void onProgressThrowingHandlerKeepsReceivingLaterEventsWithinRequest() throws IOException {
         AtomicInteger calls = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
-        Progress<Connection.Response> failAfterThree = (processed, total, percent, response) -> {
+        AtomicBoolean completed = new AtomicBoolean();
+        Progress<Connection.Response> failOnce = (processed, total, percent, response) -> {
             int n = calls.incrementAndGet();
+            if (percent == 100f) completed.set(true);
             if (n == 3) {
                 failures.incrementAndGet();
-                throw new IllegalStateException("boom");
+                throw new IllegalStateException("boom"); // must suppress only this one notification
             }
         };
 
         Jsoup.connect(origin().file.url("/htmltests/large.html"))
-            .onProgress(failAfterThree)
+            .onProgress(failOnce)
             .get();
 
-        assertEquals(3, calls.get(), "after a throw, the handler is detached and sees no later events");
-        assertEquals(1, failures.get());
+        assertTrue(calls.get() > 3, "later events still arrive after the one that threw");
+        assertEquals(1, failures.get(), "only a single event threw");
+        assertTrue(completed.get(), "the completion event is still delivered");
     }
 
     @Test void onProgressFailureOnFirstRequestDoesNotPolluteNextRequestOnSameConnection() throws IOException {

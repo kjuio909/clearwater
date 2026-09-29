@@ -1006,7 +1006,7 @@ public class HttpConnection implements Connection {
                 res.charset = DataUtil.getCharsetFromContentType(res.contentType); // may be null, readInputStream deals with it
                 // only a delivered successful (2xx/3xx) response may report completion; an error status body must
                 // never signal 100% even when read to its end
-                boolean successful = res.statusCode >= 200 && res.statusCode < 400;
+                final boolean successful = res.statusCode >= 200 && res.statusCode < 400;
                 if (res.contentLength != 0 && req.method() != HEAD) { // -1 means unknown, chunked. sun throws an IO exception on 500 response with no content when trying to read body
                     InputStream stream = executor.responseBody();
                     boolean contentEncoded = res.hasHeaderWithValue(CONTENT_ENCODING, "gzip")
@@ -1022,9 +1022,15 @@ public class HttpConnection implements Connection {
 
                     if (req.responseProgress != null) { // set response progress listener
                         // progress counts decoded entity bytes; a transport Content-Length on a compressed response is
-                        // in different units, so treat the length as unknown rather than report a bogus percentage
+                        // in different units, so treat the length as unknown rather than report a bogus percentage.
+                        // Bind a live source to the request's handler rather than the instance: replacing it, or
+                        // cancelling with null, while the body is being read takes effect on the very next event.
                         int progressLength = contentEncoded ? -1 : res.contentLength;
-                        res.bodyStream.onProgress(progressLength, successful, req.responseProgress, res);
+                        final HttpConnection.Response progressRes = res;
+                        res.bodyStream.onProgress(progressLength, successful,
+                            () -> req.responseProgress != null
+                                ? new ControllableInputStream.Handle<>(req.responseProgress, progressRes)
+                                : null);
                     }
                 } else {
                     res.byteData = DataUtil.emptyByteBuffer();
