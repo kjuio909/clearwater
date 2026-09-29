@@ -1508,6 +1508,22 @@ public class ConnectTest {
         tracker.assertCompletedOnce(HelloBody.length());
     }
 
+    @Test void progressCompletesWhenBodyLengthExactlyEqualsMaxBodySize() throws IOException {
+        // the readFully()/bodyAsBytes() path stops as soon as maxBodySize bytes are buffered; when that equals the
+        // entity length it must still confirm the genuine end of entity and emit the single completion (not stay
+        // just below 100%). Runs on both the HttpURLConnection and HttpClient executors.
+        int len = HelloBody.length();
+        ProgressTracker tracker = new ProgressTracker();
+        Connection.Response res = Jsoup.connect(origin().hello.url())
+            .maxBodySize(len)
+            .onResponseProgress(tracker)
+            .execute();
+
+        byte[] body = res.bodyAsBytes();
+        assertEquals(len, body.length);
+        tracker.assertCompletedOnce(len);
+    }
+
     @Test void progressCallbackReplacementOnlyDeliversToLatest() throws IOException {
         ProgressTracker first = new ProgressTracker();
         ProgressTracker second = new ProgressTracker();

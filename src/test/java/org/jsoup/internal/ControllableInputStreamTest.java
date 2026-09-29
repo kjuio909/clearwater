@@ -7,6 +7,7 @@ import java.io.ByteArrayInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -263,6 +264,71 @@ class ControllableInputStreamTest {
         assertEquals(1, progress.countOf(100f));
         assertEquals(size, progress.last().processed);
         in.close();
+    }
+
+    @Test
+    void exactCapViaReadToByteBufferStillConfirmsCompletion() throws IOException {
+        // mirrors the readFully()/body()/bodyAsBytes() path: the stream cap and the read cap both equal the entity
+        // length. readToByteBuffer stops filling once the cap is met, but must still issue the end-of-entity
+        // confirmation so the single terminal completion is delivered (regression: it previously stayed at ~99.99%).
+        int size = 100;
+        byte[] data = new byte[size];
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), SharedConstants.DefaultBufferSize, size);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(size, true, progress, in);
+
+        ByteBuffer bytes = ControllableInputStream.readToByteBuffer(in, size);
+        in.close();
+
+        assertEquals(size, bytes.remaining(), "the whole capped entity was captured");
+        assertEquals(1, progress.countOf(100f), "exactly one completion despite the read stopping exactly on the cap");
+        Event terminal = progress.last();
+        assertEquals(size, terminal.processed);
+        assertEquals(size, terminal.total);
+        assertEquals(100f, terminal.percent);
+    }
+
+    @Test
+    void exactCapViaReadToByteBufferUnknownLengthStillCompletes() throws IOException {
+        // chunked/unknown length, read through readFully with a cap that equals the actual delivered length
+        int size = 100;
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[size]), SharedConstants.DefaultBufferSize, size);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(-1, true, progress, in);
+
+        ControllableInputStream.readToByteBuffer(in, size);
+        in.close();
+
+        assertEquals(1, progress.countOf(100f));
+        Event terminal = progress.last();
+        assertEquals(size, terminal.processed, "processed carries the delivered length");
+        assertEquals(-1, terminal.total, "an unknown length stays -1 even at the confirmed completion");
+        assertEquals(100f, terminal.percent);
+    }
+
+    @Test
+    void readToByteBufferAtCapProbeLosesNoBytesWhenTruncated() throws IOException {
+        // the end-of-entity confirmation at a full cap must not discard the byte probed beyond it: once the cap is
+        // lifted and the remainder is drained, the complete entity (no gap, no corruption) is delivered.
+        int size = 150;
+        int cap = 100;
+        byte[] data = new byte[size];
+        for (int i = 0; i < size; i++) data[i] = (byte) (i % 251 + 1);
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), SharedConstants.DefaultBufferSize, cap);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(size, true, progress, in);
+
+        ByteBuffer head = ControllableInputStream.readToByteBuffer(in, cap);
+        assertEquals(0, progress.countOf(100f), "a genuine truncation is not mistaken for an end of entity");
+
+        in.max(0); // lift the cap and drain the retained remainder
+        ByteBuffer tail = ControllableInputStream.readToByteBuffer(in, 0);
+        in.close();
+
+        assertEquals(cap, head.remaining());
+        assertEquals(size - cap, tail.remaining(), "the probed byte and the rest are all retained");
+        assertEquals(data[cap], tail.get(tail.position()), "no byte is lost or duplicated at the cap boundary");
+        assertEquals(1, progress.countOf(100f), "completion arrives only after the genuine end is read");
     }
 
     @Test

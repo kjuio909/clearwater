@@ -172,6 +172,7 @@ public class ControllableInputStream extends FilterInputStream {
         try {
             int remaining = max;
             int read;
+            boolean capReached = false;
             while ((read = in.read(readBuf, 0, capped ? Math.min(remaining, DefaultBufferSize) : DefaultBufferSize)) != -1) {
                 if (outBuf.remaining() < read) { // needs to grow
                     int newCapacity = (int) Math.max(outBuf.capacity() * 1.5, outBuf.capacity() + read);
@@ -183,8 +184,17 @@ public class ControllableInputStream extends FilterInputStream {
                 outBuf.put(readBuf, 0, read);
                 if (capped) {
                     remaining -= read;
-                    if (remaining <= 0) break;
+                    if (remaining <= 0) { capReached = true; break; }
                 }
+            }
+            if (capReached) {
+                // The loop stops as soon as the cap is filled, without issuing the read that confirms whether the
+                // entity ended exactly on the cap or continues beyond it. A zero-length read still runs the
+                // controlled end-of-entity confirmation (a cap probe + completion on a ControllableInputStream,
+                // where the probed byte is retained and nothing is discarded), while on a plain stream it returns 0
+                // and consumes nothing. This delivers the single terminal completion for an entity whose length
+                // exactly equals the cap, without mistaking a truncation for an end.
+                in.read(readBuf, 0, 0);
             }
             outBuf.flip(); // Prepare the buffer for reading
             return outBuf;
