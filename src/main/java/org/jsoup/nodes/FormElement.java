@@ -137,6 +137,10 @@ public class FormElement extends Element {
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
      * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
      * {@code optgroup} ancestor, are never submitted.
+     * <p>A {@code textarea}'s value is submitted verbatim (spaces, tabs, Unicode characters and blank lines are
+     * preserved), except that its line breaks &mdash; a lone {@code \r}, a lone {@code \n}, or a {@code \r\n} pair
+     * &mdash; are each normalized to {@code \r\n}, as a browser does before submitting. This does not modify the
+     * textarea's DOM text. Field names and the values of inputs, options and files are left untouched.</p>
      * <p>In addition to the form's descendant controls, controls elsewhere in the same Document that carry a
      * {@code form} attribute whose value is this form's {@code id} are submitted as well (matching the browser's
      * <a href="https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#association-of-controls-and-forms">
@@ -179,6 +183,10 @@ public class FormElement extends Element {
                         }
                     }
                 }
+            } else if (el.nameIs("textarea")) {
+                // checked before the input-only type branches: a type attribute is non-conforming on a textarea and
+                // never changes its control type. wholeText() preserves spaces, tabs and blank lines verbatim
+                data.add(HttpConnection.KeyVal.create(name, normalizeTextareaNewlines(el.wholeText())));
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
                 if (el.hasAttr("checked")) {
@@ -190,6 +198,32 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     * Normalize the newlines of a submitted textarea value to the platform-independent {@code CRLF} sequence, per the
+     * browser's <a href="https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#the-textarea-element-2">
+     * textarea wrapping / line break normalization</a>: a lone {@code \r}, a lone {@code \n}, or a {@code \r\n} pair each
+     * become a single {@code \r\n}. Every other character (spaces, tabs, Unicode, and consecutive blank lines) is copied
+     * verbatim, and an empty value stays an empty string. Applied only when reading the value, so the DOM is never
+     * mutated and repeated reads produce the same result (the mapping is idempotent).
+     */
+    private static String normalizeTextareaNewlines(String value) {
+        if (value.indexOf('\r') == -1 && value.indexOf('\n') == -1) return value; // fast path: nothing to normalize
+
+        StringBuilder out = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\r') {
+                out.append("\r\n");
+                if (i + 1 < value.length() && value.charAt(i + 1) == '\n') i++; // consume the LF of a CRLF pair
+            } else if (c == '\n') {
+                out.append("\r\n");
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     /**
