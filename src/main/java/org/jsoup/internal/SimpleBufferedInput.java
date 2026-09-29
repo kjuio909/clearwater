@@ -26,6 +26,7 @@ class SimpleBufferedInput extends FilterInputStream {
     private int bufLength;
     private int bufMark = -1; // mark set by ControllableInputStream; -1 when unset
     private boolean inReadFully = false; // true when the underlying inputstream has been read fully
+    private boolean emptyFill = false;   // last fill() had room but the open source returned 0 (a transient short read)
 
     SimpleBufferedInput(@Nullable InputStream in) {
         super(in);
@@ -57,17 +58,20 @@ class SimpleBufferedInput extends FilterInputStream {
             bufAvail = bufLength - bufPos;
         }
 
-        int read = Math.min(bufAvail, desiredLen);
-        if (read <= 0) {
-            return -1;
+        if (bufAvail <= 0) {
+            // no buffered bytes: a still-open source that momentarily returned 0 on a len>0 fill is a short read of
+            // 0 (callers retry); anything else is the prior -1 result (a confirmed end or a cap/mark boundary)
+            return emptyFill ? 0 : -1;
         }
 
+        int read = Math.min(bufAvail, desiredLen);
         System.arraycopy(getBuf(), bufPos, dest, offset, read);
         bufPos += read;
         return read;
     }
 
     private void fill() throws IOException {
+        emptyFill = false;
         if (inReadFully) return;
         if (byteBuf == null) { // get one on first demand
             byteBuf = BufferPool.borrow();
@@ -101,6 +105,8 @@ class SimpleBufferedInput extends FilterInputStream {
                 bufLength += read;
                 if (capped) capRemaining -= read;
             }
+        } else if (read == 0) {
+            emptyFill = true; // the source is open but momentarily empty; not an end of entity
         }
         if (read == -1) inReadFully = true;
     }

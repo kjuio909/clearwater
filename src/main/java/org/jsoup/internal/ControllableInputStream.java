@@ -88,6 +88,7 @@ public class ControllableInputStream extends FilterInputStream {
 
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
+        if (len == 0) return 0; // per the InputStream contract, a zero-length read requests nothing and reports nothing
         emitInitialProgress();
 
         boolean capped = maxSize != 0;
@@ -115,16 +116,19 @@ public class ControllableInputStream extends FilterInputStream {
 
             try {
                 final int read = super.read(b, off, len);
+                if (read == 0) {
+                    continue; // the source is momentarily empty (a len>0 read returned 0): a short read, not an end
+                }
                 if (read == -1) { // the underlying entity genuinely ended
                     complete();
-                } else {
-                    if (capped && read > 0) {
-                        remaining -= read; // track bytes returned to the caller
-                    }
-                    // todo: use long progress values in the public API; saturate until that is available
-                    readPos = read > Integer.MAX_VALUE - readPos ? Integer.MAX_VALUE : readPos + read;
-                    emitProgress();
+                    return -1;
                 }
+                if (capped) {
+                    remaining -= read; // track bytes returned to the caller
+                }
+                // todo: use long progress values in the public API; saturate until that is available
+                readPos = read > Integer.MAX_VALUE - readPos ? Integer.MAX_VALUE : readPos + read;
+                emitProgress();
                 return read;
             } catch (SocketTimeoutException e) {
                 if (expired() || timeout == 0)

@@ -379,8 +379,7 @@ class ControllableInputStreamTest {
     }
 
     @Test
-    void cancellingHandlerLiveStopsEventsButReadContinues() throws IOException {
-        int size = 10_000;
+    void cancellingHandlerLiveStopsEventsButReadContinues() throws IOException {        int size = 10_000;
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[size]), 0);
         ProgressEvents first = new ProgressEvents();
         AtomicReference<ControllableInputStream.Handle<?>> active =
@@ -422,6 +421,128 @@ class ControllableInputStreamTest {
         assertEquals(firstEvents, first.size(), "the old handler receives nothing after the live swap");
         assertEquals(1, second.countOf(100f), "the new handler sees its own completion");
         assertEquals(size, second.last().processed);
+        in.close();
+    }
+
+    // ===== Short reads / momentarily empty buffers must not look like an end of entity =====
+
+    /**
+     A source that may return 0 on a {@code len>0} read before data becomes available: a legal short read meaning
+     "nothing right now", distinct from the {@code -1} end-of-entity signal.
+     */
+    private static final class ShortReadStream extends InputStream {
+        private int shortReadsRemaining;
+        private int dataRemaining;
+
+        ShortReadStream(int shortReadsBeforeData, int data) {
+            this.shortReadsRemaining = shortReadsBeforeData;
+            this.dataRemaining = data;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (dataRemaining <= 0) return -1;
+            dataRemaining--;
+            return 0;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) {
+            if (shortReadsRemaining > 0) {
+                shortReadsRemaining--;
+                return 0; // a transient short read: the source is open but momentarily empty
+            }
+            if (dataRemaining <= 0) return -1;
+            int read = Math.min(dataRemaining, len);
+            dataRemaining -= read;
+            return read;
+        }
+    }
+
+    @Test
+    void leadingShortReadsDoNotTruncateKnownLengthOrCompleteEarly() throws IOException {
+        int size = 10_000;
+        ControllableInputStream in = ControllableInputStream.wrap(new ShortReadStream(3, size), 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(size, true, progress, in);
+
+        assertEquals(size, drainCount(in));
+
+        progress.assertMonotonic();
+        assertEquals(new Event(0, size, 0f), progress.first(), "starts at the declared initial event, not a false completion");
+        assertEquals(1, progress.countOf(100f), "completion fires only after the whole entity is read");
+        assertEquals(size, progress.last().processed);
+        in.close();
+    }
+
+    @Test
+    void leadingShortReadsDoNotFireFalseCompletionForUnknownLength() throws IOException {
+        int size = 10_000;
+        ControllableInputStream in = ControllableInputStream.wrap(new ShortReadStream(3, size), 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(-1, true, progress, in);
+
+        assertEquals(size, drainCount(in));
+
+        for (int i = 0; i < progress.events.size() - 1; i++)
+            assertEquals(0f, progress.events.get(i).percent, "percent stays 0 until the confirmed end");
+        assertEquals(1, progress.countOf(100f), "no premature (0,-1,100) completion from an empty buffer");
+        Event terminal = progress.last();
+        assertEquals(size, terminal.processed, "completion carries the actually delivered bytes");
+        assertEquals(-1, terminal.total);
+        in.close();
+    }
+
+    @Test
+    void midStreamShortReadIsRetriedAndProgressStaysMonotonic() throws IOException {
+        int size = 20_000;
+        // deliver one chunk, then return 0 a couple of times mid-stream, then the rest
+        ControllableInputStream in = ControllableInputStream.wrap(new InputStream() {
+            int delivered = 0;
+            int zeros = 2;
+            @Override public int read() { return delivered < size ? (delivered++ & 0xff) : -1; }
+            @Override public int read(byte[] b, int off, int len) {
+                if (delivered == 4096 && zeros > 0) { zeros--; return 0; }
+                if (delivered >= size) return -1;
+                int read = Math.min(size - delivered, len);
+                delivered += read;
+                return read;
+            }
+        }, 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(size, true, progress, in);
+
+        assertEquals(size, drainCount(in));
+        progress.assertMonotonic();
+        assertEquals(1, progress.countOf(100f));
+        assertEquals(size, progress.last().processed);
+        in.close();
+    }
+
+    @Test
+    void shortReadOnSingleByteReadIsRetried() throws IOException {
+        int size = 100;
+        ControllableInputStream in = ControllableInputStream.wrap(new ShortReadStream(2, size), 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(size, true, progress, in);
+
+        int count = 0;
+        while (in.read() != -1) count++; // routes through the controlled byte[] read, so short reads still apply
+        assertEquals(size, count);
+        assertEquals(1, progress.countOf(100f));
+        in.close();
+    }
+
+    @Test
+    void zeroLengthReadReturnsZeroWithoutProgressOrCompletion() throws IOException {
+        ControllableInputStream in = ControllableInputStream.wrap(new ShortReadStream(5, 100), 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(100, true, progress, in);
+
+        assertEquals(0, in.read(new byte[10], 0, 0)); // InputStream contract: len==0 returns 0
+        assertEquals(0, progress.size(), "a zero-length request emits no event");
+        assertEquals(100, drainCount(in));
+        assertEquals(1, progress.countOf(100f));
         in.close();
     }
 
