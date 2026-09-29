@@ -1393,11 +1393,15 @@ public class ConnectTest {
         }
 
         void assertCompletedOnce(int expectedProcessed) {
+            assertCompletedOnce(expectedProcessed, expectedProcessed);
+        }
+
+        void assertCompletedOnce(int expectedProcessed, int expectedTotal) {
             assertEquals(1, completions(), "exactly one completion event, events=" + events);
             Event last = events.get(events.size() - 1);
             assertEquals(100f, last.percent);
             assertEquals(expectedProcessed, last.processed);
-            assertEquals(expectedProcessed, last.total);
+            assertEquals(expectedTotal, last.total);
         }
     }
 
@@ -1445,13 +1449,12 @@ public class ConnectTest {
 
         assertEquals(LargeDocTextLen, doc.text().length());
         // progress counts decoded entity bytes; the compressed transport length is a different unit, so the total
-        // stays unknown and percent stays zero until the genuine end
-        for (int i = 0; i < tracker.events.size() - 1; i++) {
-            ProgressTracker.Event e = tracker.events.get(i);
-            assertEquals(-1, e.total, "compressed responses report an unknown length until complete");
-            assertEquals(0f, e.percent, "no premature 100% against the compressed length");
-        }
-        tracker.assertCompletedOnce(LargeDocFileLen);
+        // stays unknown on every event and percent stays zero until the genuine end
+        for (ProgressTracker.Event e : tracker.events)
+            assertEquals(-1, e.total, "compressed responses report an unknown length on every event");
+        for (int i = 0; i < tracker.events.size() - 1; i++)
+            assertEquals(0f, tracker.events.get(i).percent, "no premature 100% against the compressed length");
+        tracker.assertCompletedOnce(LargeDocFileLen, -1);
     }
 
     @Test void progressOnHeadRequestStillCompletes() throws IOException {
@@ -1467,7 +1470,7 @@ public class ConnectTest {
         assertEquals(0, res.bodyAsBytes().length);
     }
 
-    @Test void progressOnErrorStatusReportsDeliveryButNeverCompletion() throws IOException {
+    @Test void progressOnErrorStatusCompletesAtEntityEofWithStatusInContext() throws IOException {
         ProgressTracker tracker = new ProgressTracker();
         Connection.Response res = Jsoup.connect(echoUrl)
             .header(EchoRoute.CodeParam, "500")
@@ -1478,10 +1481,9 @@ public class ConnectTest {
         byte[] body = res.bodyAsBytes(); // an error status still delivers a body
         assertEquals(500, res.statusCode());
         assertTrue(body.length > 0);
-        assertEquals(0, tracker.completions(), "an error response must never report completion");
-        ProgressTracker.Event last = tracker.events.get(tracker.events.size() - 1);
-        assertTrue(last.percent < 100f);
-        assertEquals(body.length, last.processed, "actually delivered bytes may be reported");
+        // completion describes the delivered entity reaching EOF; the non-success status is read from the context
+        tracker.assertCompletedOnce(body.length);
+        assertEquals(500, tracker.context.statusCode(), "the caller distinguishes success from the Response context");
     }
 
     @Test void noOpProgressCallbackDoesNotAffectResult() throws IOException {
@@ -1585,11 +1587,13 @@ public class ConnectTest {
         assertEquals(LargeDocTextLen, doc.text().length(), "the document is identical to the no-handler result");
     }
 
-    @Test void onProgressThrowingHandlerStopsReceivingEventsWithinRequest() throws IOException {
+    @Test void onProgressThrowingHandlerSkipsOnlyThatNotification() throws IOException {
         AtomicInteger calls = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
-        Progress<Connection.Response> failAfterThree = (processed, total, percent, response) -> {
+        AtomicBoolean sawCompletion = new AtomicBoolean();
+        Progress<Connection.Response> failOnThree = (processed, total, percent, response) -> {
             int n = calls.incrementAndGet();
+            if (percent == 100f) sawCompletion.set(true);
             if (n == 3) {
                 failures.incrementAndGet();
                 throw new IllegalStateException("boom");
@@ -1597,11 +1601,12 @@ public class ConnectTest {
         };
 
         Jsoup.connect(origin().file.url("/htmltests/large.html"))
-            .onProgress(failAfterThree)
+            .onProgress(failOnThree)
             .get();
 
-        assertEquals(3, calls.get(), "after a throw, the handler is detached and sees no later events");
         assertEquals(1, failures.get());
+        assertTrue(calls.get() > 3, "only the failing notification is skipped; the handler keeps receiving events");
+        assertTrue(sawCompletion.get(), "the completion event is still delivered to the same handler");
     }
 
     @Test void onProgressFailureOnFirstRequestDoesNotPolluteNextRequestOnSameConnection() throws IOException {

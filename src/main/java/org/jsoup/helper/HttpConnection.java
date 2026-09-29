@@ -1004,9 +1004,6 @@ public class HttpConnection implements Connection {
                 }
 
                 res.charset = DataUtil.getCharsetFromContentType(res.contentType); // may be null, readInputStream deals with it
-                // only a delivered successful (2xx/3xx) response may report completion; an error status body must
-                // never signal 100% even when read to its end
-                boolean successful = res.statusCode >= 200 && res.statusCode < 400;
                 if (res.contentLength != 0 && req.method() != HEAD) { // -1 means unknown, chunked. sun throws an IO exception on 500 response with no content when trying to read body
                     InputStream stream = executor.responseBody();
                     boolean contentEncoded = res.hasHeaderWithValue(CONTENT_ENCODING, "gzip")
@@ -1024,15 +1021,14 @@ public class HttpConnection implements Connection {
                         // progress counts decoded entity bytes; a transport Content-Length on a compressed response is
                         // in different units, so treat the length as unknown rather than report a bogus percentage
                         int progressLength = contentEncoded ? -1 : res.contentLength;
-                        res.bodyStream.onProgress(progressLength, successful, req.responseProgress, res);
+                        res.bodyStream.onProgress(progressLength, req.responseProgress, res);
                     }
                 } else {
                     res.byteData = DataUtil.emptyByteBuffer();
-                    // an empty entity (explicit zero length, or a HEAD request that delivers no body) has no body
-                    // stream to read, yet the caller still needs a single determinable completion event rather than
-                    // no progress at all; an unsuccessful status still never signals completion
+                    // a declared-zero entity (or a HEAD that delivers no body) has no stream to read, yet the caller
+                    // still needs a single determinable completion event: nothing was delivered, and it is finished
                     if (req.responseProgress != null)
-                        emitProgress(req.responseProgress, 0, 0, successful ? 100f : 0f, res);
+                        emitProgress(req.responseProgress, 0, 0, 100f, res);
                 }
             } catch (IOException e) {
                 if (res != null) res.safeClose(); // will be non-null if got to conn

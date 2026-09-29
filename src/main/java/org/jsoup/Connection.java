@@ -531,22 +531,27 @@ public interface Connection {
      <p>The Response object is supplied as the progress context, and may be read from to obtain headers etc.</p>
      <h4>Progress semantics</h4>
      <ul>
-     <li>{@code processed} is the number of delivered entity bytes and is reported monotonically; it never moves
-     backwards, repeats at zero, or overflows (it saturates at {@link Integer#MAX_VALUE} for very large bodies).</li>
+     <li>{@code processed} is the number of delivered entity bytes and is reported in read order, monotonically; it
+     never moves backwards, repeats at zero, exceeds a declared length (it saturates at the declared total), or
+     overflows (it saturates at {@link Integer#MAX_VALUE} for very large bodies).</li>
      <li>{@code total} is the declared response length and stays fixed while the body is read. When the length is
-     unknown (e.g. a chunked or compressed response), {@code total} is {@code -1} until the entity is confirmed read
-     to its end, at which point it resolves to the delivered length.</li>
+     unknown (e.g. a chunked or compressed response), {@code total} is always {@code -1}, including on the terminal
+     completion event.</li>
      <li>{@code percent} tracks {@code processed} against {@code total} and reaches {@code 100} exactly once, on the
-     terminal event that confirms the entity was read to its end. While the length is unknown it stays at {@code 0}
-     until that point. An empty entity (or a {@code HEAD} request) still emits this single completion event.</li>
+     terminal event that confirms the delivered entity reached end-of-file. While the length is unknown it stays at
+     {@code 0} until that point; short reads, a temporarily empty buffer, and the bodies of intermediate responses
+     never complete it early. A fixed-length zero entity and an unknown-length empty entity (or a {@code HEAD}
+     request) each still emit this single completion event, and progress never returns to zero afterwards.</li>
      <li>Only the response entity actually delivered to the caller is counted. Bodies of intermediate responses
      encountered following redirects or authentication challenges are discarded and contribute no bytes, no
      percentage regression, and no extra completion.</li>
-     <li>A non-success status (when {@link #ignoreHttpErrors(boolean) errors are ignored}) and an I/O failure part way
-     through a read may report the bytes already delivered, but never report {@code 100} and never complete
-     successfully; the usual exception semantics are unchanged.</li>
-     <li>The handler only observes progress; it does not affect parsing, the returned content, request headers, or
-     redirect handling. Registering a handler replaces any previously registered handler for that request.</li>
+     <li>If the declared length does not match the entity actually delivered, or an I/O failure occurs part way
+     through a read, the existing exception type and already-read data semantics are preserved, but progress never
+     reports {@code 100} and the request is not treated as a successful completion. Whether a non-2xx status raises
+     is governed independently by {@link #ignoreHttpErrors(boolean)}; when its body is delivered, progress completes
+     on that entity's end-of-file and the status is available from the {@link Response} context.</li>
+     <li>The handler only observes progress; it does not affect the body, request headers, redirect choice, parsing,
+     or the source input. Registering a handler replaces any previously registered handler for that request.</li>
      </ul>
      @param handler the progress handler
      @return this Connection, for chaining
@@ -561,14 +566,14 @@ public interface Connection {
      * parsed as they are downloaded, this is also a good proxy for parse progress. This is equivalent to
      * {@link #onResponseProgress(Progress)}, and is the primary entry point for observing download progress.
      <p>The {@link Response} object is supplied as the progress context, and may be read to obtain headers etc.</p>
-     <p>The handler is a purely side-channel observer: it must not affect the fetch. In particular, if the handler
-     throws a {@link RuntimeException} on any progress event, that exception is swallowed and never propagated to
-     the caller; the current request still consumes the response and returns the same document (or raises the same
-     request exception) it would have without a handler. After such a failure the handler receives no further events
-     for that request, but the network read, parsing, and resource close all still run to completion, and no
-     completion event is fabricated. Progress state (counters, percentage, failure flag) is per request: reusing a
-     connection for another request rebuilds it independently, so a handler that threw, an empty response, or a
-     completed response on one request never affects the next.</p>
+     <p>The handler is a purely side-channel observer: it must not affect the fetch. If the handler throws a
+     {@link RuntimeException} on any progress event, that exception is swallowed and never propagated to the caller;
+     only that single notification is skipped. The current request still consumes the response and returns the same
+     document (or raises the same request exception) it would have without a handler, the network read, parsing, and
+     resource close all run to completion, and the handler keeps receiving the remaining events for that request
+     (including the completion event). Progress state (counters and completion) is per request: reusing a connection
+     for another request rebuilds it independently, so an empty response or a completed response on one request never
+     affects the next.</p>
      @param handler the progress handler, or {@code null} to remove any previously registered handler
      @return this Connection, for chaining
      @since 1.23.3

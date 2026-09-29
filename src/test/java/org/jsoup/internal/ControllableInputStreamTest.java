@@ -137,7 +137,7 @@ class ControllableInputStreamTest {
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(size, true, progress, in);
+        in.onProgress(size, progress, in);
 
         readAll(in);
 
@@ -153,25 +153,23 @@ class ControllableInputStreamTest {
     }
 
     @Test
-    void unknownLengthStaysAtZeroUntilSingleCompletion() throws IOException {
+    void unknownLengthTotalStaysMinusOneAndCompletesOnceAtEof() throws IOException {
         int size = 10_000;
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(-1, true, progress, in);
+        in.onProgress(-1, progress, in);
 
         readAll(in);
 
         progress.assertMonotonic();
-        for (int i = 0; i < progress.events.size() - 1; i++) {
-            Event e = progress.events.get(i);
-            assertEquals(-1, e.total, "total stays -1 until end");
-            assertEquals(0f, e.percent, "percent stays 0 until end");
-        }
+        for (Event e : progress.events) assertEquals(-1, e.total, "an unknown total is always -1, even at completion");
+        for (int i = 0; i < progress.events.size() - 1; i++)
+            assertEquals(0f, progress.events.get(i).percent, "percent stays 0 until end");
         assertEquals(1, progress.countOf(100f));
         Event terminal = progress.last();
-        assertEquals(size, terminal.processed);
-        assertEquals(size, terminal.total, "total resolves to delivered length at the end");
+        assertEquals(size, terminal.processed, "processed is the actual delivered byte count");
+        assertEquals(-1, terminal.total, "total is not resolved to the delivered length");
         assertEquals(100f, terminal.percent);
     }
 
@@ -180,7 +178,7 @@ class ControllableInputStreamTest {
         // declared zero length: a single terminal event, no leading 0% event
         ControllableInputStream zero = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[0]), 0);
         ProgressEvents zeroProgress = new ProgressEvents();
-        zero.onProgress(0, true, zeroProgress, zero);
+        zero.onProgress(0, zeroProgress, zero);
         readAll(zero);
         readAll(zero); // a second drain must not emit a second completion
         assertEquals(1, zeroProgress.size(), "a declared-empty entity emits exactly one event");
@@ -190,13 +188,13 @@ class ControllableInputStreamTest {
         // unknown length: an initial (0, -1, 0) followed by the single terminal completion
         ControllableInputStream unknown = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[0]), 0);
         ProgressEvents unknownProgress = new ProgressEvents();
-        unknown.onProgress(-1, true, unknownProgress, unknown);
+        unknown.onProgress(-1, unknownProgress, unknown);
         readAll(unknown);
         readAll(unknown);
         assertEquals(-1, unknownProgress.first().total);
         assertEquals(0f, unknownProgress.first().percent);
         assertEquals(1, unknownProgress.countOf(100f), "exactly one completion");
-        assertEquals(new Event(0, 0, 100f), unknownProgress.last());
+        assertEquals(new Event(0, -1, 100f), unknownProgress.last(), "an unknown length is not resolved to 0");
         unknown.close();
     }
 
@@ -207,7 +205,7 @@ class ControllableInputStreamTest {
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(size, true, progress, in);
+        in.onProgress(size, progress, in);
 
         byte[] buf = new byte[8192];
         in.max(5120);
@@ -228,7 +226,7 @@ class ControllableInputStreamTest {
         int delivered = 3000;
         ControllableInputStream in = ControllableInputStream.wrap(new FailingInputStream(delivered), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(10_000, true, progress, in);
+        in.onProgress(10_000, progress, in);
 
         IOException thrown = assertThrows(IOException.class, () -> readAll(in));
         assertEquals("boom", thrown.getMessage());
@@ -247,7 +245,7 @@ class ControllableInputStreamTest {
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 10);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(size, true, progress, in);
+        in.onProgress(size, progress, in);
 
         byte[] buf = new byte[100];
         int first = in.read(buf);
@@ -266,20 +264,44 @@ class ControllableInputStreamTest {
     }
 
     @Test
-    void unsuccessfulStatusNeverReportsCompletion() throws IOException {
-        int size = 500;
-        byte[] data = new byte[size];
-        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
+    void declaredLengthLongerThanEntityNeverCompletes() throws IOException {
+        int declared = 1000;
+        int actual = 500;
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[actual]), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(size, false, progress, in); // e.g. an error status delivered with ignoreHttpErrors
+        in.onProgress(declared, progress, in); // the server promised more than it delivered
 
         readAll(in);
 
         progress.assertMonotonic();
-        assertEquals(0, progress.countOf(100f), "an error response must never signal completion");
-        assertEquals(size, progress.last().processed, "delivered bytes are still reported");
-        assertTrue(progress.last().percent < 100f);
-        assertEquals(size, progress.last().total);
+        assertEquals(0, progress.countOf(100f), "a length mismatch must not report a false completion");
+        Event last = progress.last();
+        assertEquals(actual, last.processed, "the actually delivered bytes are reported honestly");
+        assertEquals(declared, last.total, "the declared total is not rewritten");
+        assertTrue(last.percent < 100f, "percent stays below 100: " + last.percent);
+        in.close();
+    }
+
+    @Test
+    void declaredLengthShorterThanEntityClampsAndNeverCompletes() throws IOException {
+        int declared = 500;
+        int actual = 900;
+        ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(new byte[actual]), 0);
+        ProgressEvents progress = new ProgressEvents();
+        in.onProgress(declared, progress, in); // the server delivered more than it declared
+
+        int delivered = drainCount(in);
+        assertEquals(actual, delivered, "the read itself delivers all bytes unchanged");
+
+        progress.assertMonotonic();
+        for (Event e : progress.events)
+            assertTrue(e.processed <= declared, "processed must never exceed the declared length: " + e);
+        assertEquals(0, progress.countOf(100f), "a length mismatch must not report a false completion");
+        Event last = progress.last();
+        assertEquals(declared, last.processed, "reported processed saturates at the declared length");
+        assertEquals(declared, last.total);
+        assertTrue(last.percent < 100f);
+        in.close();
     }
 
     @Test
@@ -288,7 +310,7 @@ class ControllableInputStreamTest {
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents progress = new ProgressEvents();
-        in.onProgress(size, true, progress, in);
+        in.onProgress(size, progress, in);
 
         while (in.read() != -1) { } // byte-by-byte
 
@@ -304,7 +326,7 @@ class ControllableInputStreamTest {
         AtomicInteger lastProcessed = new AtomicInteger(-1);
         AtomicBoolean negative = new AtomicBoolean(false);
         AtomicBoolean completed = new AtomicBoolean(false);
-        in.onProgress(-1, true, (processed, total, percent, context) -> {
+        in.onProgress(-1, (processed, total, percent, context) -> {
             if (processed < 0) negative.set(true);
             if (percent == 100f) completed.set(true);
             lastProcessed.set(processed);
@@ -323,7 +345,7 @@ class ControllableInputStreamTest {
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents first = new ProgressEvents();
-        in.onProgress(size, true, first, in);
+        in.onProgress(size, first, in);
 
         byte[] buf = new byte[100];
         in.read(buf); // drive some progress on the first callback
@@ -331,7 +353,7 @@ class ControllableInputStreamTest {
         assertTrue(firstEvents > 0);
 
         ProgressEvents second = new ProgressEvents();
-        in.onProgress(size, true, second, in); // register a fresh observer mid-response
+        in.onProgress(size, second, in); // register a fresh observer mid-response
         readAll(in);
 
         assertEquals(firstEvents, first.size(), "the replaced callback receives nothing further");
@@ -368,24 +390,24 @@ class ControllableInputStreamTest {
     }
 
     @Test
-    void failingHandlerNeverAbortsReadOrLeaksAndGetsNoFurtherEvents() throws IOException {
+    void failingHandlerNeverAbortsReadButKeepsReceivingLaterEvents() throws IOException {
         int size = 10_000;
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ExplodingProgress initialFail = new ExplodingProgress(1); // throws on the initial (0,total,0%) event
-        in.onProgress(size, true, initialFail, in);
+        in.onProgress(size, initialFail, in);
 
         int delivered = drainCount(in); // must not throw
 
         assertEquals(size, delivered, "the fetch continues and delivers every byte");
-        assertEquals(1, initialFail.calls.get(), "after throwing, the handler receives no further events");
-        assertFalse(initialFail.sawCompletion.get(), "a detached failure must not produce a completion");
+        assertTrue(initialFail.calls.get() > 1, "only the failing notification is skipped; later events still arrive");
+        assertTrue(initialFail.sawCompletion.get(), "the completion event is still delivered to the same handler");
         in.close();
 
-        // a fresh registration on the same stream starts independent: prior failure state does not leak
+        // a fresh registration on a new stream starts independent: prior failure state does not leak
         ControllableInputStream again = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ProgressEvents fresh = new ProgressEvents();
-        again.onProgress(size, true, fresh, again);
+        again.onProgress(size, fresh, again);
         assertEquals(size, drainCount(again));
         fresh.assertMonotonic();
         assertEquals(1, fresh.countOf(100f), "a new observer completes on its own state");
@@ -394,50 +416,50 @@ class ControllableInputStreamTest {
     }
 
     @Test
-    void handlerThrowingMidStreamIsDetachedWithoutCompletion() throws IOException {
+    void handlerThrowingMidStreamSkipsOnlyThatNotification() throws IOException {
         int size = 10_000;
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ExplodingProgress midFail = new ExplodingProgress(2); // initial event OK, first data event throws
-        in.onProgress(size, true, midFail, in);
+        in.onProgress(size, midFail, in);
 
         int delivered = drainCount(in); // must not throw and must read the whole entity
 
         assertEquals(size, delivered);
-        assertEquals(2, midFail.calls.get(), "no events delivered after the failing one");
-        assertFalse(midFail.sawCompletion.get(), "no completion is forged for a failed handler");
+        assertTrue(midFail.calls.get() > 2, "events after the throwing one are still delivered");
+        assertTrue(midFail.sawCompletion.get(), "the throw neither suppresses nor fabricates completion");
         in.close();
     }
 
     @Test
-    void handlerThrowingOnTerminalEventIsSwallowed() throws IOException {
+    void handlerThrowingOnEveryEventStillSeesCompletionAndReadIsUnaffected() throws IOException {
         int size = 1000;
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
-        Progress<Object> terminalFail = new Progress<Object>() {
+        Progress<Object> alwaysFail = new Progress<Object>() {
             int calls = 0;
             @Override public void onProgress(int processed, int total, float percent, Object context) {
                 calls++;
-                if (percent == 100f) throw new RuntimeException("cannot stop completion");
+                throw new RuntimeException("cannot stop progress: " + calls);
             }
         };
-        in.onProgress(size, true, terminalFail, new Object());
+        in.onProgress(size, alwaysFail, new Object());
 
-        assertEquals(size, drainCount(in)); // the terminal throw must not escape the final read
+        assertEquals(size, drainCount(in)); // every throw is swallowed; bytes are still delivered
         in.close();
     }
 
     @Test
-    void unknownLengthFailingHandlerStillReadsToEndWithoutCompletion() throws IOException {
+    void unknownLengthFailingHandlerStillReadsToEndAndGetsCompletion() throws IOException {
         int size = 10_000;
         byte[] data = new byte[size];
         ControllableInputStream in = ControllableInputStream.wrap(new ByteArrayInputStream(data), 0);
         ExplodingProgress progress = new ExplodingProgress(1);
-        in.onProgress(-1, true, progress, in); // unknown length
+        in.onProgress(-1, progress, in); // unknown length
 
         assertEquals(size, drainCount(in));
-        assertEquals(1, progress.calls.get());
-        assertFalse(progress.sawCompletion.get());
+        assertTrue(progress.calls.get() > 1, "the handler is not detached after throwing");
+        assertTrue(progress.sawCompletion.get(), "completion at end-of-entity is still delivered");
         in.close();
     }
 

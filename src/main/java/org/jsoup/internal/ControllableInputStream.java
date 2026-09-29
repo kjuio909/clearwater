@@ -32,13 +32,12 @@ public class ControllableInputStream extends FilterInputStream {
 
     // if we are tracking progress, will have the expected content length and progress callback state
     private @Nullable ProgressState<?> progress;
-    private int contentLength = -1;         // declared content length for progress; -1 == unknown
-    private boolean successful = true;     // whether the response was a successful status; failures never report completion
+    private int contentLength = -1;         // declared content length for progress; -1 == unknown, and is reported as-is
     private int readPos = 0;                // logical amount read; can move backwards on reset()
     private int highWater = 0;              // furthest logical position ever read; progress never reports below this
     private int lastEmitted = -1;           // last processed value emitted, to suppress duplicate re-read events
     private boolean emittedInitial = false; // the initial (0, total, 0%) event has been emitted
-    private boolean completed = false;      // the terminal completion event has been emitted
+    private boolean completed = false;      // end of entity has been reached (terminal handling done once)
 
     private ControllableInputStream(SimpleBufferedInput in, int maxSize) {
         super(in);
@@ -291,82 +290,91 @@ public class ControllableInputStream extends FilterInputStream {
             return;
         }
         emittedInitial = true;
-        int processed = Math.max(readPos, highWater);
-        highWater = processed;
+        highWater = Math.max(highWater, readPos);
+        int processed = reportPosition();
         lastEmitted = processed;
-        float percent = contentLength > 0 ? Math.min(100f, processed * 100f / contentLength) : 0f;
+        float percent = percentFor(processed);
         deliver(processed, contentLength, percent);
     }
 
     /**
      Emits an intermediate progress event, unless the logical position is being re-read after a reset, in which case
-     the already-reported high-water position is held so that progress never moves backwards or repeats.
+     the already-reported high-water position is held so that progress never moves backwards or repeats. When the
+     declared length is exceeded, {@code processed} is held at the declared value rather than reported past it.
      */
     private void emitProgress() {
         ProgressState<?> progress = this.progress;
         if (progress == null) return;
-        int processed = Math.max(readPos, highWater);
-        highWater = processed;
-        if (processed == lastEmitted) return; // re-reading buffered content after a reset: no new progress
+        highWater = Math.max(highWater, readPos);
+        int processed = reportPosition();
+        if (processed == lastEmitted) return; // re-reading buffered content after a reset, or held at the declared cap
         lastEmitted = processed;
-        // calculate percent complete against the declared length; unknown length stays at 0
-        float percent = contentLength > 0 ? processed * 100f / contentLength : 0f;
-        // 100% is reserved for the single terminal event confirmed at end-of-entity; an intermediate read that
-        // already meets (or exceeds, e.g. with a compressed declared length) the total reports just below it
-        if (percent >= 100f) percent = Math.nextDown(100f);
-        deliver(processed, contentLength, percent);
+        deliver(processed, contentLength, percentFor(processed));
+    }
+
+    /** The position to report: the delivered high-water mark, never exceeding a declared length. */
+    private int reportPosition() {
+        return contentLength > 0 ? Math.min(highWater, contentLength) : highWater;
+    }
+
+    /**
+     Percent for an intermediate position. {@code 100%} is reserved for the single terminal event confirmed at
+     end-of-entity, so an intermediate position that meets the declared total reports just below it, and an unknown
+     length always reports {@code 0}.
+     */
+    private float percentFor(int processed) {
+        if (contentLength <= 0) return 0f;
+        return Math.min(Math.nextDown(100f), processed * 100f / contentLength);
     }
 
     /**
      * Delegates a progress event to the registered callback, isolating any {@link RuntimeException} the callback
-     * throws: the callback is a side-channel observer, so its failure must neither abort the read nor be forged into
-     * a completion. After such a failure the callback is detached and receives no further events for this request,
-     * while the network read, parsing, and close all continue as if no callback was registered.
+     * throws: the callback is a side-channel observer, so its failure skips only that single notification. The
+     * callback stays registered, the network read/parse/close continue, and the next progress event is still
+     * delivered to the same callback.
      */
     private void deliver(int processed, int total, float percent) {
         ProgressState<?> progress = this.progress;
         if (progress == null) return;
-        if (!progress.emit(processed, total, percent))
-            this.progress = null;
+        progress.emit(processed, total, percent);
     }
 
     /**
-     Emits the exactly-once terminal completion event when the entity has been confirmed read to its end. Reaching a
-     configured cap is not completion while further content exists; an I/O failure does not call this, so a failed
-     read never reports completion. An unsuccessful response status may report the bytes actually delivered, but never
-     a 100% completion.
+     Performs the exactly-once terminal handling when the entity has been confirmed read to its end. Reaching a
+     configured cap is not an end while further content exists, and an I/O failure never reaches this method, so a
+     failed read never reports completion. The terminal event is only a {@code 100%} completion when the delivered
+     entity matches its declared length (or no length was declared, in which case {@code total} stays {@code -1});
+     a declared-length mismatch reports the honest partial delivery below {@code 100%} and is never a success.
      */
     private void complete() {
-        highWater = Math.max(highWater, readPos);
         if (progress == null || completed) return;
         completed = true;
         emittedInitial = true;
-        int processed = highWater;
-        if (successful) {
-            // once read to the end, an unknown length is resolved to the delivered length; a declared length is held
-            int total = contentLength > 0 ? contentLength : processed;
-            deliver(processed, total, 100f);
+        highWater = Math.max(highWater, readPos);
+        int delivered = highWater;
+        if (contentLength > 0 && delivered != contentLength) {
+            // declared length does not match the entity actually delivered: keep the exception/read-data semantics of
+            // the stream itself, but never report 100% nor treat the request as successfully complete. Report the
+            // honest partial delivery (held below the declared value), but only when it advances beyond the last
+            // notification, so a mismatch never produces a redundant non-progress event.
+            int processed = Math.min(delivered, contentLength);
+            if (processed != lastEmitted) {
+                lastEmitted = processed;
+                deliver(processed, contentLength, percentFor(processed));
+            }
         } else {
-            // unsuccessful status: report the actual partial delivery, but hold below completion and keep total as
-            // declared (-1 when unknown) so that the caller never mistakes it for a successful completion
-            float percent = contentLength > 0
-                ? Math.min(Math.nextDown(100f), processed * 100f / contentLength)
-                : 0f;
-            deliver(processed, contentLength, percent);
+            // genuine end of entity: unknown length (total stays -1), a declared zero, or an exact declared length
+            lastEmitted = delivered;
+            deliver(delivered, contentLength, 100f);
         }
-        this.progress = null; // detach: no later buffered hit may report another completion
+        this.progress = null; // terminal handling happens once; a later buffered re-drain must not report again
     }
 
-    public <ProgressContext> ControllableInputStream onProgress(int contentLength, Progress<ProgressContext> callback, ProgressContext context) {
-        return onProgress(contentLength, true, callback, context);
-    }
-
-    public <ProgressContext> ControllableInputStream onProgress(int contentLength, boolean successful,
+    public <ProgressContext> ControllableInputStream onProgress(int contentLength,
         Progress<ProgressContext> callback, ProgressContext context) {
         Validate.notNull(callback);
         Validate.notNull(context);
         this.contentLength = contentLength;
-        this.successful = successful;
         this.progress = new ProgressState<>(callback, context);
         // each registration observes independently from the current logical position, without leaking the
         // completion or high-water state of a previously registered callback
@@ -402,17 +410,16 @@ public class ControllableInputStream extends FilterInputStream {
         }
 
         /**
-         * Invokes the callback and reports whether it returned normally. A {@link RuntimeException} thrown by the
-         * callback is swallowed here (progress is a side-channel observation that must never change the fetch
-         * result); {@code false} tells the caller to detach this failed callback for the rest of the request.
-         @return true if the callback accepted the event; false if it threw
+         Invokes the callback, isolating a {@link RuntimeException} it throws to this single notification. Progress
+         is a side-channel observation that must never change the fetch, so the exception is swallowed and is not
+         propagated to the reader. The callback is not detached: the next progress event is delivered to it normally,
+         and a throw on one event neither fabricates nor suppresses the completion event.
          */
-        boolean emit(int processed, int total, float percent) {
+        void emit(int processed, int total, float percent) {
             try {
                 callback.onProgress(processed, total, percent, context);
-                return true;
             } catch (RuntimeException e) {
-                return false;
+                // skip only this notification; the read, close, and later notifications continue
             }
         }
     }
