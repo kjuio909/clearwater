@@ -137,6 +137,13 @@ public class FormElement extends Element {
      * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
      * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
      * {@code optgroup} ancestor, are never submitted.
+     * <p>A submitted {@code textarea} value has its line breaks normalized the way a browser does before encoding the
+     * form: each lone carriage return ({@code \r}), each lone line feed ({@code \n}), and each existing
+     * {@code \r\n} pair becomes a single {@code \r\n} pair, in original order. Every other character (including
+     * spaces, tabs, Unicode characters, and runs of blank lines) is copied verbatim, and an empty value is still
+     * submitted as the empty string. This affects only the submitted textarea value &mdash; field names, input
+     * values, option values, and the textarea's own DOM text are never rewritten, and reading the data repeatedly
+     * yields the same stable result.</p>
      * <p>In addition to the form's descendant controls, controls elsewhere in the same Document that carry a
      * {@code form} attribute whose value is this form's {@code id} are submitted as well (matching the browser's
      * <a href="https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#association-of-controls-and-forms">
@@ -186,10 +193,35 @@ public class FormElement extends Element {
                     data.add(HttpConnection.KeyVal.create(name, val));
                 }
             } else {
-                data.add(HttpConnection.KeyVal.create(name, el.val()));
+                String val = el.val();
+                if (el.nameIs("textarea")) // browsers normalize the submitted textarea value's line breaks to CRLF
+                    val = normalizeTextareaNewlines(val);
+                data.add(HttpConnection.KeyVal.create(name, val));
             }
         }
         return data;
+    }
+
+    /**
+     * Normalizes the line breaks in a textarea's submitted value the way the browser does: each lone U+000D (carriage
+     * return), each lone U+000A (line feed), and each U+000D U+000A pair becomes a single U+000D U+000A pair. Every
+     * other character (spaces, tabs, Unicode characters, and blank lines) is copied verbatim, the empty string stays
+     * empty, and the result is canonical and idempotent (a repeat normalization changes nothing). The input string is
+     * not modified and the DOM is not touched.
+     */
+    private static String normalizeTextareaNewlines(String val) {
+        if (val.indexOf('\r') == -1 && val.indexOf('\n') == -1) return val; // fast path: nothing to normalize
+        StringBuilder out = new StringBuilder(val.length() + 2);
+        for (int i = 0; i < val.length(); i++) {
+            char c = val.charAt(i);
+            if (c == '\r' || c == '\n') {
+                out.append('\r').append('\n');
+                if (c == '\r' && i + 1 < val.length() && val.charAt(i + 1) == '\n') i++; // collapse an existing CR LF pair
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     /**

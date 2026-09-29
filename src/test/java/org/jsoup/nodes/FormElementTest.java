@@ -759,8 +759,7 @@ public class FormElementTest {
         assertEquals(expected, doc.html()); // no nodes, attributes, or structure changed
     }
 
-    @Test void externalAssociationsSurviveSerializationRoundTrip() {
-        String html = "<input name='x' value='1' form='f'>" +
+    @Test void externalAssociationsSurviveSerializationRoundTrip() {        String html = "<input name='x' value='1' form='f'>" +
             "<form id='f'><input name='a' value='2'></form>" +
             "<select name='s' multiple form='f'><option value='q' selected></select>";
         Document doc = Jsoup.parse(html);
@@ -775,5 +774,134 @@ public class FormElementTest {
             assertEquals(before.get(i).key(), after.get(i).key());
             assertEquals(before.get(i).value(), after.get(i).value());
         }
+    }
+
+    @Test void textareaNewlinesAreNormalizedToCrLf() {
+        String html = "<form><textarea name='ta'>a\rb\nc\r\nd\r\re\n\nf</textarea></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("a\r\nb\r\nc\r\nd\r\n\r\ne\r\n\r\nf", data.get(0).value());
+        assertEquals("ta", data.get(0).key());
+    }
+
+    @Test void textareaNewlineNormalizationPreservesAllOtherCharacters() {
+        // internal spaces, tabs, and unicode characters stay verbatim (leading/trailing trimming is val()'s
+        // pre-existing behavior, unrelated to newline normalization)
+        String raw = "two  spaces\there ä中文😀 end";
+        String html = "<form><textarea name='ta'>" + raw + "</textarea></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(raw, data.get(0).value());
+
+        // empty and newline-free values are returned untouched
+        Document empty = Jsoup.parse("<form><textarea name='a'></textarea><textarea name='b'>plain</textarea></form>");
+        List<Connection.KeyVal> emptyData = ((FormElement) empty.selectFirst("form")).formData();
+        assertEquals("", emptyData.get(0).value());
+        assertEquals("plain", emptyData.get(1).value());
+    }
+
+    @Test void textareaNewlineNormalizationIsStableAndDoesNotRewriteDom() {
+        String raw = "a\rb\nc\r\nd";
+        String html = "<form><textarea name='ta'>" + raw + "</textarea></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        String expected = "a\r\nb\r\nc\r\nd";
+
+        Connection.KeyVal kv1 = form.formData().get(0);
+        assertEquals(expected, kv1.value());
+        // repeat reads must not accumulate or change the newlines
+        assertEquals(expected, form.formData().get(0).value());
+        assertEquals(expected, form.formData().get(0).value());
+
+        // the textarea's DOM text keeps its original line breaks
+        assertEquals(raw, form.selectFirst("textarea").val());
+
+        // mutating the returned keyval/list cannot feed back into the DOM or later reads
+        kv1.value("hacked");
+        form.formData().clear();
+        assertEquals(expected, form.formData().get(0).value());
+        assertEquals(raw, form.selectFirst("textarea").val());
+    }
+
+    @Test void otherFieldValuesAreNotNewlineNormalized() {
+        String html = "<form>" +
+            "<input name='in' value='a\rb\nc\r\nd'>" +
+            "<select name='sel'><option value='x\ry\nz' selected></select>" +
+            "<textarea name='ta'>a\rb</textarea>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals("a\rb\nc\r\nd", data.get(0).value()); // input value untouched
+        assertEquals("x\ry\nz", data.get(1).value());      // option value untouched
+        assertEquals("a\r\nb", data.get(2).value());       // only the textarea is normalized
+    }
+
+    @Test void normalizedNewlinesDoNotAffectSuccessfulControlFiltering() {
+        // a disabled textarea with newlines is still excluded; a textarea disabled via fieldset likewise
+        String html = "<form>" +
+            "<textarea name='a' disabled>a\rb</textarea>" +
+            "<fieldset disabled><textarea name='b'>c\nd</textarea>" +
+            "<legend><textarea name='c'>e\r\nf</textarea></legend></fieldset>" +
+            "<textarea name='g'>h\ri</textarea>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("c", data.get(0).key()); // first-legend exception still applies
+        assertEquals("e\r\nf", data.get(0).value());
+        assertEquals("g", data.get(1).key());
+        assertEquals("h\r\ni", data.get(1).value());
+
+        // re-enabling and (re)moving/renaming is reflected on the next read
+        form.selectFirst("textarea").removeAttr("disabled");
+        data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("a", data.get(0).key());
+        assertEquals("a\r\nb", data.get(0).value());
+
+        form.selectFirst("[name=b]").removeAttr("disabled"); // fieldset still disabled: no change
+        assertEquals(3, form.formData().size());
+
+        form.selectFirst("fieldset").removeAttr("disabled");
+        assertEquals(4, form.formData().size());
+    }
+
+    @Test void externalTextareaNewlinesAreNormalizedInDocumentOrder() {
+        String html = "<form id='f'><textarea name='in'>a\rb</textarea></form>" +
+            "<div><textarea name='out' form='f'>c\nd</textarea></div>" +
+            "<textarea name='other' form='nope'>e\nf</textarea>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("in", data.get(0).key());
+        assertEquals("a\r\nb", data.get(0).value());
+        assertEquals("out", data.get(1).key());
+        assertEquals("c\r\nd", data.get(1).value()); // external form-associated textarea uses the same rule
+    }
+
+    @Test void normalizedTextareaNewlinesSurviveSerializationRoundTrip() {
+        String html = "<form><textarea name='ta'>a\rb\nc\r\nd\r\n\re</textarea></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> before = form.formData();
+
+        Document reparse = Jsoup.parse(doc.html());
+        List<Connection.KeyVal> after = ((FormElement) reparse.selectFirst("form")).formData();
+
+        assertEquals(1, before.size());
+        assertEquals(before.get(0).key(), after.get(0).key());
+        assertEquals(before.get(0).value(), after.get(0).value());
+        assertEquals("a\r\nb\r\nc\r\nd\r\n\r\ne", after.get(0).value());
     }
 }
