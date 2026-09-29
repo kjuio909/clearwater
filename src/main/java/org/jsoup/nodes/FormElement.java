@@ -134,9 +134,10 @@ public class FormElement extends Element {
      * {@code fieldset}, excepting descendants of that fieldset's first {@code legend} child), and {@code button} /
      * {@code reset} / {@code submit} / {@code image} inputs are excluded;
      * checkboxes and radios are only included when {@code checked} (defaulting to the value {@code "on"}); a
-     * {@code select[multiple]} submits every selected option, while a single {@code select} with no selected option
-     * falls back to its first non-disabled option. Options that are disabled, either directly or by a disabled
-     * {@code optgroup} ancestor, are never submitted.
+     * {@code select[multiple]} submits every selected option (in DOM order, keeping duplicate names), while a single
+     * {@code select} submits only the first selected option in DOM order, and with no selected enabled option falls
+     * back to its first non-disabled option (a select with no submittable option at all is omitted). Options that are
+     * disabled, either directly or by a disabled {@code optgroup} ancestor, are never submitted.
      * <p>A {@code textarea}'s value is submitted verbatim (spaces, tabs, Unicode characters and blank lines are
      * preserved), except that its line breaks &mdash; a lone {@code \r}, a lone {@code \n}, or a {@code \r\n} pair
      * &mdash; are each normalized to {@code \r\n}, as a browser does before submitting. This does not modify the
@@ -167,21 +168,36 @@ public class FormElement extends Element {
                 || type.equalsIgnoreCase("submit") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these (a submit button only if it was the clicker)
 
             if (el.nameIs("select")) {
-                Elements options = el.select("option[selected]");
-                boolean set = false;
-                for (Element option: options) {
-                    if (isDisabledOption(option)) continue; // disabled options are not successful
-                    data.add(HttpConnection.KeyVal.create(name, option.val()));
-                    set = true;
-                }
-                if (!set && !el.hasAttr("multiple")) {
-                    // a single select defaults to its first non-disabled option
-                    for (Element option : el.select("option")) {
-                        if (!isDisabledOption(option)) {
-                            data.add(HttpConnection.KeyVal.create(name, option.val()));
+                Elements selectedOptions = el.select("option[selected]");
+                if (el.hasAttr("multiple")) {
+                    // a multiple select submits every selected, enabled option, in DOM order; duplicate names are kept
+                    for (Element option: selectedOptions) {
+                        if (isDisabledOption(option)) continue; // disabled options are not successful
+                        data.add(HttpConnection.KeyVal.create(name, option.val()));
+                    }
+                    // no fallback for a multiple select: when nothing selected is submittable, the field is omitted
+                } else {
+                    // a single select submits at most one value: the first selected option in DOM order that is
+                    // enabled, even if several options carry the selected attribute
+                    Element option = null;
+                    for (Element selected: selectedOptions) {
+                        if (!isDisabledOption(selected)) {
+                            option = selected;
                             break;
                         }
                     }
+                    if (option == null) {
+                        // nothing selected is submittable: fall back to the first enabled option in DOM order
+                        for (Element candidate : el.select("option")) {
+                            if (!isDisabledOption(candidate)) {
+                                option = candidate;
+                                break;
+                            }
+                        }
+                    }
+                    // if there is no enabled option at all, the field is omitted
+                    if (option != null)
+                        data.add(HttpConnection.KeyVal.create(name, option.val()));
                 }
             } else if (el.nameIs("textarea")) {
                 // checked before the input-only type branches: a type attribute is non-conforming on a textarea and

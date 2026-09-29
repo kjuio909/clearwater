@@ -48,13 +48,12 @@ public class FormElementTest {
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
 
-        assertEquals(6, data.size());
+        assertEquals(5, data.size());
         assertEquals("one=two", data.get(0).toString());
-        assertEquals("three=four", data.get(1).toString());
-        assertEquals("three=five", data.get(2).toString());
-        assertEquals("six=seven", data.get(3).toString());
-        assertEquals("seven=on", data.get(4).toString()); // set
-        assertEquals("eight=on", data.get(5).toString()); // default
+        assertEquals("three=four", data.get(1).toString()); // a single select submits only the first selected option
+        assertEquals("six=seven", data.get(2).toString());
+        assertEquals("seven=on", data.get(3).toString()); // set
+        assertEquals("eight=on", data.get(4).toString()); // default
         // nine should not appear, not checked checkbox
         // ten should not appear, disabled
         // eleven should not appear, button
@@ -255,6 +254,147 @@ public class FormElementTest {
         assertEquals(2, data.size());
         assertEquals("one=c", data.get(0).toString()); // explicit selection wins
         assertEquals("two=e", data.get(1).toString()); // no selection: first non-disabled option
+    }
+
+    @Test void singleSelectSubmitsOnlyFirstSelectedOption() {
+        String html = "<form><select name=s>" +
+            "<option value=a selected><option value=b selected><option value=c selected disabled>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("s=a", data.get(0).toString()); // only the first selected option; later selecteds add no duplicate
+    }
+
+    @Test void singleSelectSkipsDisabledSelectedBeforeLaterSelected() {
+        String html = "<form><select name=s>" +
+            "<optgroup disabled><option value=a selected></optgroup>" +
+            "<option value=b selected disabled>" +
+            "<option value=c selected>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("s=c", data.get(0).toString()); // the first selected option that is itself and group-enabled
+    }
+
+    @Test void singleSelectWithOnlyDisabledSelectedFallsBackToFirstEnabled() {
+        String html = "<form><select name=s>" +
+            "<option value=a disabled><optgroup disabled><option value=b selected></optgroup>" +
+            "<option value=c selected disabled><option value=d>" +
+            "</select><select name=t><option value=e selected disabled></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size()); // t has no enabled option and is omitted
+        assertEquals("s=d", data.get(0).toString()); // fallback is the first enabled option, not the first option
+    }
+
+    @Test void selectSubmissionTracksLiveDomChanges() {
+        String html = "<form><select id=sel name=s>" +
+            "<option id=o1 value=a><option id=o2 value=b selected><option id=o3 value=c selected>" +
+            "</select><input name=after value=1></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element sel = doc.selectFirst("#sel");
+        Element o1 = doc.selectFirst("#o1");
+        Element o2 = doc.selectFirst("#o2");
+        Element o3 = doc.selectFirst("#o3");
+
+        // single: only the first selected
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("s=b", data.get(0).toString());
+        assertEquals("after=1", data.get(1).toString());
+
+        // disabling the winning selection hands the single value to the next selected, without a duplicate
+        o2.attr("disabled", "");
+        data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("s=c", data.get(0).toString());
+
+        // dropping all selected options triggers the first-enabled fallback
+        o2.removeAttr("selected");
+        o3.removeAttr("selected");
+        data = form.formData();
+        assertEquals("s=a", data.get(0).toString());
+
+        // switching to multiple now submits every selected enabled option in DOM order
+        sel.attr("multiple", "");
+        o1.attr("selected", "");
+        o3.attr("selected", "");
+        data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("s=a", data.get(0).toString()); // a and c, not the disabled b
+        assertEquals("s=c", data.get(1).toString());
+        assertEquals("after=1", data.get(2).toString());
+
+        // moving an option reorders the values; the disabled move changes eligibility
+        sel.appendChild(o1); // a now follows c in the DOM
+        o2.removeAttr("disabled");
+        o2.attr("selected", "");
+        data = form.formData();
+        assertEquals(4, data.size());
+        assertEquals("s=b", data.get(0).toString()); // DOM order is now b, c, a
+        assertEquals("s=c", data.get(1).toString());
+        assertEquals("s=a", data.get(2).toString());
+        assertEquals("after=1", data.get(3).toString());
+
+        // renaming the control changes only the key; an emptied name omits the whole field
+        sel.attr("name", "renamed");
+        data = form.formData();
+        assertEquals("renamed=b", data.get(0).toString());
+        sel.attr("name", "");
+        data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("after=1", data.get(0).toString());
+
+        // reads never wrote back to the DOM
+        assertTrue(o1.hasAttr("selected"));
+        assertTrue(o2.hasAttr("selected"));
+        assertTrue(o3.hasAttr("selected"));
+        assertFalse(o2.hasAttr("disabled"));
+        assertTrue(sel.hasAttr("multiple"));
+    }
+
+    @Test void brokenSelectOnlyAffectsItsOwnField() {
+        // a select with no submittable option must not swallow or alter the fields around it
+        String html = "<form><input name=before value=1>" +
+            "<select name=empty><optgroup disabled><option value=a selected></optgroup><option value=b disabled></select>" +
+            "<input name=after value=2></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("before=1", data.get(0).toString());
+        assertEquals("after=2", data.get(1).toString());
+    }
+
+    @Test void selectSubmissionSurvivesSerializationRoundTrip() {
+        String html = "<form>" +
+            "<select name=single><option value=a disabled><option value=b selected><option value=c selected></select>" +
+            "<select name=multi multiple><option value=d selected>" +
+            "<optgroup disabled><option value=e selected></optgroup>" +
+            "<option value=f selected disabled></select>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> before = form.formData();
+
+        Document reparse = Jsoup.parse(doc.html());
+        List<Connection.KeyVal> after = ((FormElement) reparse.selectFirst("form")).formData();
+
+        assertEquals(before.size(), after.size());
+        for (int i = 0; i < before.size(); i++) {
+            assertEquals(before.get(i).key(), after.get(i).key());
+            assertEquals(before.get(i).value(), after.get(i).value());
+        }
     }
 
     @Test void disabledOptgroupDisablesSelectedOptions() {
